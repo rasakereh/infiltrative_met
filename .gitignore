@@ -1,0 +1,11 @@
+analysis/
+com_figs/
+contour/
+figs/
+image_gen/
+old/
+steps/
+
+.DS_Store
+.Rhistory
+
