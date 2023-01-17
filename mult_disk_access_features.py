@@ -210,7 +210,7 @@ def extract_features(src, stains, labels_im, biggest_comps, feature_list, h_pix_
 
         seg[labels_im == comp, 2] = 0
 
-        if mask_area(curr_im, 1, 1, None, None) < 25:
+        if mask_area_px_sq(curr_im) < 100:
             break
 
         curr_features = calculate_features(hp_seg, feature_list, h_pix_size, w_pix_size, brain_boundary_pts)
@@ -281,66 +281,81 @@ def _tiled_switch(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cach
     
     return switch_seg
 
-def brain_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    pix_area = h_pix_size * w_pix_size
-    return np.where(obj_segments[:, :, 1] != 0)[0].shape[0] * pix_area
+def mask_area_px_sq(mask):
+    return np.where(mask != 0)[0].shape[0]
 
-def tumor_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+def _brain_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pix_area = h_pix_size * w_pix_size
-    return np.where(obj_segments[:, :, 0] != 0)[0].shape[0] * pix_area
+    return mask_area_px_sq(obj_segments[:, :, 1]) * pix_area
+
+def _tumor_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    pix_area = h_pix_size * w_pix_size
+    return mask_area_px_sq(obj_segments[:, :, 0]) * pix_area
+
+def _brain_largest_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    if '_brain_curve' in cache:
+        contours = cache['_brain_curve']
+    else:
+        contours = _brain_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    
+    biggest_comp_mask = np.zeros(obj_segments.shape[:2], np.uint8)
+    cv2.drawContours(biggest_comp_mask, (contours,), -1, 1, -1)
+    biggest_comp = cv2.bitwise_and(obj_segments, obj_segments,mask = biggest_comp_mask)
+
+    pix_area = h_pix_size * w_pix_size
+    return mask_area_px_sq(biggest_comp) * pix_area
 
 def tiled_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pix_area = h_pix_size * w_pix_size
     
-    if 'brain_area' in cache:
-        brain_area_val = cache['brain_area'] / pix_area
+    if '_brain_area' in cache:
+        brain_area = cache['_brain_area'] / pix_area
     else:
-        brain_area_val = brain_area(obj_segments, 1, 1, brain_boundary_pts, cache)
+        brain_area = _brain_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
-    if 'tumor_area' in cache:
-        tumor_area_val = cache['tumor_area'] / pix_area
+    if '_tumor_area' in cache:
+        tumor_area = cache['_tumor_area'] / pix_area
     else:
-        tumor_area_val = tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
+        tumor_area = _tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
     if '_tiled_switch' in cache:
         tiled_switch = cache['_tiled_switch']
     else:
         tiled_switch = _tiled_switch(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
 
-    return np.where(tiled_switch != 0)[0].shape[0] / (np.sqrt(brain_area_val) + np.sqrt(tumor_area_val))
+    return np.where(tiled_switch != 0)[0].shape[0] / (np.sqrt(brain_area) + np.sqrt(tumor_area))
 
 def tiled_sum(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pix_area = h_pix_size * w_pix_size
     
-    if 'brain_area' in cache:
-        brain_area_val = cache['brain_area'] / pix_area
+    if '_brain_area' in cache:
+        brain_area = cache['_brain_area'] / pix_area
     else:
-        brain_area_val = brain_area(obj_segments, 1, 1, brain_boundary_pts, cache)
+        brain_area = _brain_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
-    if 'tumor_area' in cache:
-        tumor_area_val = cache['tumor_area'] / pix_area
+    if '_tumor_area' in cache:
+        tumor_area = cache['_tumor_area'] / pix_area
     else:
-        tumor_area_val = tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
+        tumor_area = _tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
     if '_tiled_switch' in cache:
         tiled_switch = cache['_tiled_switch']
     else:
         tiled_switch = _tiled_switch(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
 
-    return np.sum(tiled_switch) / (np.sqrt(brain_area_val) + np.sqrt(tumor_area_val))
+    return np.sum(tiled_switch) / (np.sqrt(brain_area) + np.sqrt(tumor_area))
 
-def _brain_mask(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    return brain_mask
+def _brain_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    contours, _ = cv2.findContours(obj_segments[:,:,1].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    largest_cont = max(contours, key = cv2.contourArea)
 
-def _mask_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    contours, _ = cv2.findContours(obj_segments, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    return contours
+    return largest_cont
 
 def _mask_curvature(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    if '_mask_curve' in cache:
-        contours = cache['_mask_curve']
+    if '_brain_curve' in cache:
+        contours = cache['_brain_curve']
     else:
-        contours = _mask_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+        contours = _brain_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
 
     conversion_mat = np.array([
         [5/4, 1, 3/4],
@@ -348,7 +363,7 @@ def _mask_curvature(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, ca
         [7/4, 0, 1/4]
     ])
 
-    variation = contours[0][1:, 0] - contours[0][:-1, 0]
+    variation = contours[1:, 0] - contours[0][:-1, 0]
     variation_ang = conversion_mat[variation[:,0]+1, variation[:,1]+1]
     curvature = variation_ang[1:] - variation_ang[:-1]
     curvature[curvature >= 2] = curvature[curvature >= 2] - 2
@@ -357,51 +372,50 @@ def _mask_curvature(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, ca
 
     return curvature
 
-def _mask_convex_hull(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    if '_mask_curve' in cache:
-        contours = cache['_mask_curve']
+def _brain_convex_hull(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    if '_brain_curve' in cache:
+        contours = cache['_brain_curve']
     else:
-        contours = _mask_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
-    hull = cv2.convexHull(contours[0])
+        contours = _brain_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    hull = cv2.convexHull(contours)
 
     return hull
 
-def mask_perimeter(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    if '_mask_curve' in cache:
-        contours = cache['_mask_curve']
+def _brain_perimeter(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    if '_brain_curve' in cache:
+        contours = cache['_brain_curve']
     else:
-        contours = _mask_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+        contours = _brain_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
     
     pix_size = (h_pix_size + w_pix_size) / 2
 
-    return cv2.arcLength(contours[0], True) * pix_size
+    return cv2.arcLength(contours, True) * pix_size
 
-def mask_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    pix_area = h_pix_size * w_pix_size
-    return np.where(obj_segments != 0)[0].shape[0] * pix_area
-
-def mask_compactness(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    m_perim = cache['mask_perimeter'] if 'mask_perimeter' in cache else mask_perimeter(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
-    m_area = cache['mask_area'] if 'mask_area' in cache else mask_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
-    compactness = np.pi * 4 * m_area / m_perim / m_perim
+def brain_compactness(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    b_perim = cache['_brain_perimeter'] if '_brain_perimeter' in cache else _brain_perimeter(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    b_area = cache['_brain_largest_area'] if '_brain_largest_area' in cache else _brain_largest_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    compactness = np.pi * 4 * b_area / b_perim / b_perim
 
     return compactness
 
-def mask_convexity(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    m_perim = cache['mask_perimeter'] if 'mask_perimeter' in cache else mask_perimeter(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
-    m_cnx_hull = cache['_mask_convex_hull'] if '_mask_convex_hull' in cache else _mask_convex_hull(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
-    m_cnx_perim = mask_perimeter(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, {'_mask_curve': [m_cnx_hull]})
+def brain_convexity(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    b_perim = cache['_brain_perimeter'] if '_brain_perimeter' in cache else _brain_perimeter(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    b_cnx_hull = cache['_brain_convex_hull'] if '_brain_convex_hull' in cache else _brain_convex_hull(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
 
-    convexity = m_cnx_perim / m_perim
+    b_cnx_perim = _brain_perimeter(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, {'_brain_curve': b_cnx_hull})
+
+    convexity = b_cnx_perim / b_perim
 
     return convexity
 
-def mask_solidity(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    m_area = cache['mask_area'] if 'mask_area' in cache else mask_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
-    m_cnx_hull = cache['_mask_convex_hull'] if '_mask_convex_hull' in cache else _mask_convex_hull(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
-    m_cnx_area = cv2.contourArea(m_cnx_hull)
+def brain_solidity(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    b_area = cache['_brain_largest_area'] if '_brain_largest_area' in cache else _brain_largest_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    b_cnx_hull = cache['_brain_convex_hull'] if '_brain_convex_hull' in cache else _brain_convex_hull(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    
+    pix_area = h_pix_size * w_pix_size
+    b_cnx_area = cv2.contourArea(b_cnx_hull) * pix_area
 
-    solidity = m_area / m_cnx_area if m_cnx_area != 0 else 1
+    solidity = b_area / b_cnx_area if b_cnx_area != 0 else 1
 
     return solidity
 
@@ -422,10 +436,10 @@ def total_abs_curv(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
     return np.mean(np.abs(curvature))
 
 def nearest_boundary_score(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    if '_mask_curve' in cache:
-        curr_boundary = cache['_mask_curve']
+    if '_brain_curve' in cache:
+        curr_boundary = cache['_brain_curve']
     else:
-        curr_boundary = _mask_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+        curr_boundary = _brain_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
     curr_boundary = curr_boundary[0].reshape((-1, 2))
 
     pix_size = (h_pix_size + w_pix_size) / 2
@@ -453,27 +467,39 @@ def nearest_boundary_score(obj_segments, h_pix_size, w_pix_size, brain_boundary_
     return {'slope': a, 'err': err}
 
 def convex_overlap(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    if '_brain_mask' in cache:
-        brain_mask = cache['_brain_mask']
+    if '_brain_convex_hull' in cache:
+        b_cnx_hull = cache['_brain_convex_hull']
     else:
-        brain_mask = _brain_mask(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+        b_cnx_hull = _brain_convex_hull(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
     
-    if '_mask_convex_hull' in cache:
-        m_cnx_hull = cache['_mask_convex_hull']
-    else:
-        m_cnx_hull = _mask_convex_hull(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    tumor_mask = obj_segments[:,:,0]
     
-    cnx_filled = np.zeros(brain_mask.shape, np.uint8)
-    cv2.fillPoly(cnx_filled, pts=[m_cnx_hull], color=255)
+    cnx_filled = np.zeros(tumor_mask.shape, np.uint8)
+    cv2.fillPoly(cnx_filled, pts=[b_cnx_hull], color=255)
 
-    brain_overlap = cv2.bitwise_and(brain_mask,brain_mask,mask = cnx_filled)
+    brain_overlap = cv2.bitwise_and(tumor_mask,tumor_mask,mask = cnx_filled)
 
-    overlaping_area = mask_area(brain_overlap, h_pix_size, w_pix_size, None, None)
-    tumorfree_hull_area = mask_area(cnx_filled, h_pix_size, w_pix_size, None, None) - mask_area(obj_segments, h_pix_size, w_pix_size, None, None)
+    overlaping_area = mask_area_px_sq(brain_overlap)
+    tumorfree_hull_area = mask_area_px_sq(cnx_filled) - mask_area_px_sq(tumor_mask)
     overlap_score = overlaping_area / tumorfree_hull_area if tumorfree_hull_area != 0 else 0
 
     return overlap_score
     
+def filled_overlap(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    tumor_mask = obj_segments[:,:,0]
+    brain_mask = obj_segments[:,:,1]
+
+    kernel = np.ones((50, 50),np.uint8)
+    closed_brain = cv2.morphologyEx(brain_mask, cv2.MORPH_CLOSE, kernel) * 255
+    closed_brain = closed_brain.astype(np.uint8)
+
+    brain_overlap = cv2.bitwise_and(tumor_mask,tumor_mask,mask = closed_brain)
+
+    filled_area = mask_area_px_sq(closed_brain) - mask_area_px_sq(brain_mask)
+    overlaping_area = mask_area_px_sq(brain_overlap)
+    overlap_score = overlaping_area / filled_area if filled_area != 0 else 0
+
+    return overlap_score
 
 def __r_thetas(thetas, tumor_point, brain_pts):
     # To check the collision, we perform a slope calculation
@@ -498,10 +524,10 @@ def surroundedness_degree(obj_segments, h_pix_size, w_pix_size, brain_boundary_p
     else:
         brain_mask = _brain_mask(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
     
-    if '_mask_curve' in cache:
-        mask_curve = cache['_mask_curve']
+    if '_brain_curve' in cache:
+        mask_curve = cache['_brain_curve']
     else:
-        mask_curve = _mask_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+        mask_curve = _brain_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
     
     pixel_locs = np.where(obj_segments == 255)
     min_y, max_y = np.amin(pixel_locs[0]), np.amax(pixel_locs[0])
@@ -524,15 +550,13 @@ def surroundedness_degree(obj_segments, h_pix_size, w_pix_size, brain_boundary_p
     
 
 def enclosing_circle_overlap(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    if '_brain_mask' in cache:
-        brain_mask = cache['_brain_mask']
-    else:
-        brain_mask = _brain_mask(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    tumor_mask = obj_segments[:,:,0]
+    tumor_mask = obj_segments[:,:,1]
 
-    if '_mask_curve' in cache:
-        mask_curve = cache['_mask_curve']
+    if '_brain_curve' in cache:
+        mask_curve = cache['_brain_curve']
     else:
-        mask_curve = _mask_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+        mask_curve = _brain_curve(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
     
     ellipse = cv2.fitEllipse(mask_curve[0])
     r = ellipse[2]
@@ -637,40 +661,41 @@ for src in src_list:
             labels_im,
             biggest_comps,
             [
+                _brain_curve,
                 _tiled_switch,
-                brain_area,
-                tumor_area,
+                _brain_perimeter,
+                _brain_area,
+                _tumor_area,
+                _brain_convex_hull,
+                _brain_largest_area,
                 tiled_count,
                 tiled_sum,
-                # _brain_mask,
-                # _mask_curve,
+                brain_compactness,
+                brain_convexity,
+                brain_solidity,
+                convex_overlap,
+                filled_overlap,
+                # enclosing_circle_overlap,
                 # _mask_curvature,
-                # _mask_convex_hull,
-                # mask_perimeter,
                 # mask_area,
-                # mask_compactness,
-                # mask_convexity,
-                # mask_solidity,
                 # #circular_variance,
                 # bending_energy,
                 # total_abs_curv,
                 # nearest_boundary_score,
-                # convex_overlap,
                 # surroundedness_degree,
-                # enclosing_circle_overlap
             ],
             curr_img['h_pix_size'],
             curr_img['w_pix_size'],
             brain_boundary_pts
         )
 
-        features_summary = all_features.describe(percentiles = np.arange(.2, 1, .2), include = 'all')
+        features_summary = all_features.describe(percentiles = np.arange(.25, 1, .25), include = 'all')
         features_summary.index.name = 'summary'
         features_summary.reset_index(inplace=True)
         features_summary = features_summary >> mutate(case = int(src[-6:-4]))
         
         all_features.hist(bins=30, grid=False, xlabelsize=5)
-        plt.savefig('steps/%s_features.png'%pref) # plt.show()
+        plt.savefig('steps/%s_features.png'%pref); plt.close() # plt.show()
 
         if plates_info is None:
             plates_info = features_summary
