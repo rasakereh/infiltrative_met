@@ -15,7 +15,8 @@ features <- read.csv('reshaped_dual.csv')
 grades <- features %>% select(case, domin_s, d_per, high_s, h_per, total)
 features <- features %>% select(-domin_s, -d_per, -high_s, -h_per, -total)
 no.var.cols <- colnames(features)[features %>% apply(2, sd) == 0]
-features <- features %>% select(-all_of(no.var.cols))
+features <- features %>% select(-all_of(no.var.cols)) %>%
+  select(-contains('_count')) #%>% select(-contains('_min')) %>% select(-contains('_max'))
 # features <- features %>% select(matches('(case|nearest|surroundedness|overlap)'))
 pca_res <- prcomp(features %>% select(-case), scale=T)$x
 pca_feat <- data.frame(

@@ -32,20 +32,17 @@ def read_slide(src, rect=None, size=None, thumbnail_size=None):
         if isinstance(rect[0], float):
             x0, y0 = int(rect[0] * img_size[0]), int(rect[1] * img_size[1])
             w, h = int(rect[2] * img_size[0]), int(rect[3] * img_size[1])
-            w, h = min(img_size[0] - x0 - 10, w), min(img_size[1] - y0 - 10, h)
+            w, h = max(10, min(img_size[0] - x0 - 10, w)), max(10, min(img_size[1] - y0 - 10, h))
             rect = (x0, y0, w, h)
 
-    if thumbnail_size is None:
-        width = min(3000, max(2000, rect[2]))
-        thumbnail_size = (width, 0)
+    if thumbnail_size is not None:
+        thumbnail = scene.read_block(rect, thumbnail_size)
+    else:
+        thumbnail = None
     if size is None:
         width = min(9000, max(5000, rect[2]))
         size = (width, 0)
     # print("img_size:", img_size)
-
-    # print("==============\nreading thumbnail...", thumbnail_size)
-    thumbnail = scene.read_block(rect, thumbnail_size)
-    # print("thumbnail read", thumbnail.shape, "\n==============")
 
     # print("==============\nreading main image...", size)
     image = scene.read_block(rect, size)
@@ -148,7 +145,7 @@ def find_normal_boundaries(brain_mask):
     
     return flat_boundary_pts, edge_img
 
-def extract_features(src, stains, labels_im, biggest_comps, feature_list, h_pix_size, w_pix_size, brain_boundary_pts, max_cmp_cnt=20):
+def extract_features(src, stains, labels_im, biggest_comps, feature_list, brain_boundary_pts, max_cmp_cnt=20):
     all_features = []
 
     seg = np.zeros((*labels_im.shape, 3))
@@ -166,6 +163,11 @@ def extract_features(src, stains, labels_im, biggest_comps, feature_list, h_pix_
     selected_indices.sort()
     
     for comp in tqdm(biggest_comps[selected_indices]):
+        # skipping small components
+        comp_size = np.where(labels_im == comp)[0].shape[0]
+        if comp_size < 100:
+                break
+
         ############################################################
         # Loading high power tumor
         pixel_locs = np.where(labels_im == comp)
@@ -181,40 +183,47 @@ def extract_features(src, stains, labels_im, biggest_comps, feature_list, h_pix_
         min_y /= labels_im.shape[0]; h /= labels_im.shape[0]
         min_x /= labels_im.shape[1]; w /= labels_im.shape[1]
 
-        curr_tumor = read_slide(src, rect = (min_x, min_y, w, h), size=(4000, 0), thumbnail_size=(500, 0))
+        # Partitioning big brain components
+        dh = h / np.ceil(h / .1)
+        dw = w / np.ceil(w / .1)
+        breaks = np.mgrid[0:w:dw, 0:h:dh].reshape(2,-1).T
+        start_pos = [min_x, min_y] + breaks
+        windows = np.repeat([[dw, dh]], start_pos.shape[0], axis=0)
+        all_rects = np.hstack([start_pos, windows])
 
-        # Segmenting high power tumor
-        hp_seg, hp_tumor_mask, hp_brain_mask, hp_immune_mask = colorbased_seg(curr_tumor['main'], stains, kern_s=3, kern_m=4, kern_b=5)
-        hp_interface, hp_brain_bound = get_interface(hp_brain_mask, hp_tumor_mask, erode_size=15, dilate_size=10)
+        for curr_rect in all_rects:
+            curr_tumor = read_slide(src, rect = curr_rect, size=(4000, 0))
+            h_pix_size, w_pix_size = curr_tumor['h_pix_size'], curr_tumor['w_pix_size']
 
-        hp_real_interface = cv2.bitwise_and(curr_tumor['main'], curr_tumor['main'], mask = hp_brain_bound)
-        ############################################################
+            # Segmenting high power tumor
+            hp_seg, _, _, _ = colorbased_seg(curr_tumor['main'], stains, kern_s=3, kern_m=4, kern_b=5)
 
-        curr_im = np.zeros(labels_im.shape, np.uint8)
-        curr_im[labels_im != comp] = 0
-        curr_im[labels_im == comp] = 255
+            # skipping tiles with no tumor / brain
+            tumor_size = np.where(hp_seg[:,:,0] != 0)[0].shape[0]
+            brain_size = np.where(hp_seg[:,:,1] != 0)[0].shape[0]
+            if (tumor_size < 1000) or (brain_size < 1000):
+                    continue
 
-        seg[labels_im == comp, 2] = 255
-        
-        # fig, axs = plt.subplots(2, 2)
-        # fig.tight_layout()
-        # axs[0, 0].imshow(curr_img['main'])
-        # axs[0, 0].set_title('Current Image')
-        # axs[0, 1].imshow(seg)
-        # axs[0, 1].set_title('Segmented')
-        # axs[1, 0].imshow(curr_tumor['main'])
-        # axs[1, 0].set_title('Current Tumor Component')
-        # axs[1, 1].imshow(hp_seg)
-        # axs[1, 1].set_title('High Power Segmented')
-        # plt.show()
+            # seg[labels_im == comp, 2] = 100
+            
+            # fig, axs = plt.subplots(2, 2)
+            # fig.tight_layout()
+            # axs[0, 0].imshow(curr_img['main'])
+            # axs[0, 0].set_title('Current Image')
+            # int_rect = np.array([curr_rect[0] * labels_im.shape[1], curr_rect[1] * labels_im.shape[0], curr_rect[2] * labels_im.shape[1], curr_rect[3] * labels_im.shape[0]], np.uint32)
+            # empty_canvas = np.zeros(seg.shape[0:2],  np.uint8)
+            # seg[:, :, 2] += cv2.rectangle(empty_canvas, int_rect[0:2], int_rect[0:2] + int_rect[2:4], 155, 20)
+            # axs[0, 1].imshow(seg)
+            # axs[0, 1].set_title('Segmented')
+            # axs[1, 0].imshow(curr_tumor['main'])
+            # axs[1, 0].set_title('Current Tumor Component')
+            # axs[1, 1].imshow(hp_seg)
+            # axs[1, 1].set_title('High Power Segmented')
+            # plt.show()
+            # seg[:, :, 2] = 0
 
-        seg[labels_im == comp, 2] = 0
-
-        if mask_area_px_sq(curr_im) < 100:
-            break
-
-        curr_features = calculate_features(hp_seg, feature_list, h_pix_size, w_pix_size, brain_boundary_pts)
-        all_features.append(curr_features)
+            curr_features = calculate_features(hp_seg, feature_list, h_pix_size, w_pix_size, brain_boundary_pts)
+            all_features.append(curr_features)
 
     all_features = pd.DataFrame.from_dict(all_features)
 
@@ -467,12 +476,17 @@ def nearest_boundary_score(obj_segments, h_pix_size, w_pix_size, brain_boundary_
     return {'slope': a, 'err': err}
 
 def convex_overlap(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    b_area = cache['_brain_largest_area'] if '_brain_largest_area' in cache else _brain_largest_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+    pix_area = h_pix_size * w_pix_size
+    b_area = int(b_area / pix_area)
+
     if '_brain_convex_hull' in cache:
         b_cnx_hull = cache['_brain_convex_hull']
     else:
         b_cnx_hull = _brain_convex_hull(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
     
     tumor_mask = obj_segments[:,:,0]
+    brain_mask = obj_segments[:,:,1]
     
     cnx_filled = np.zeros(tumor_mask.shape, np.uint8)
     cv2.fillPoly(cnx_filled, pts=[b_cnx_hull], color=255)
@@ -480,8 +494,8 @@ def convex_overlap(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
     brain_overlap = cv2.bitwise_and(tumor_mask,tumor_mask,mask = cnx_filled)
 
     overlaping_area = mask_area_px_sq(brain_overlap)
-    tumorfree_hull_area = mask_area_px_sq(cnx_filled) - mask_area_px_sq(tumor_mask)
-    overlap_score = overlaping_area / tumorfree_hull_area if tumorfree_hull_area != 0 else 0
+    nobrain_area = mask_area_px_sq(cnx_filled) - b_area
+    overlap_score = overlaping_area / nobrain_area if nobrain_area != 0 else 0
 
     return overlap_score
     
@@ -684,8 +698,6 @@ for src in src_list:
                 # nearest_boundary_score,
                 # surroundedness_degree,
             ],
-            curr_img['h_pix_size'],
-            curr_img['w_pix_size'],
             brain_boundary_pts
         )
 
