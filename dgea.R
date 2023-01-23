@@ -8,6 +8,7 @@ require(caret)
 require(kernlab)
 require(infotheo)
 require(umap)
+require(limma)
 
 cluster.cnt <- 3
 
@@ -16,13 +17,24 @@ grades <- features %>% select(case, domin_s, d_per, high_s, h_per, total)
 features <- features %>% select(-domin_s, -d_per, -high_s, -h_per, -total)
 no.var.cols <- colnames(features)[features %>% apply(2, sd) == 0]
 features <- features %>% select(-all_of(no.var.cols)) %>%
-  select(-contains('_count')) #%>% select(-contains('_min')) %>% select(-contains('_max'))
+  select(-ends_with('_count')) #%>% select(-contains('_min')) %>% select(-contains('_max'))
 # features <- features %>% select(matches('(case|nearest|surroundedness|overlap)'))
-pca_res <- prcomp(features %>% select(-case), scale=T)$x
+
+########## Normalization ##########
+anonym.feats <- features %>% select(-case) %>% t() %>% as.data.frame()
+log.feats <- log(anonym.feats - min(anonym.feats) + .01)
+# log.feats <- normalizeQuantiles(log.feats)
+log.features <- log.feats %>% t %>% as.data.frame %>% mutate(case = features$case, .before=everything())
+rownames(log.features) <- NULL
+
+features <- log.features
+###################################
+
+pca_res <- prcomp(features %>% select(-case), scale.=T)$x
 pca_feat <- data.frame(
   case = features$case,
   pca_res,
-  invasive = cut(grades$total, quantile(grades$total, (0:cluster.cnt)/cluster.cnt), include.lowest=T) %>% as.integer %>% as.factor()#ifelse(grades$domin_s == 1, 'minimal', ifelse(grades$domin_s == 2, 'moderate', 'high')) %>% as.factor()
+  invasive = cut(grades$total, quantile(grades$total, (0:cluster.cnt)/cluster.cnt), right=F, include.lowest=T) %>% as.integer %>% as.factor()#ifelse(grades$domin_s == 1, 'minimal', ifelse(grades$domin_s == 2, 'moderate', 'high')) %>% as.factor()
 )
 
 
