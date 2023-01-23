@@ -161,11 +161,13 @@ def extract_features(src, stains, labels_im, biggest_comps, feature_list, brain_
     small_cmps = rand_g.choice(np.arange(selection_size, sel_ubound), rest_sel_size, replace=False)
     selected_indices = np.concatenate((main_cmps, small_cmps))
     selected_indices.sort()
+
+    total_tiles = 0
     
     for comp in tqdm(biggest_comps[selected_indices]):
         # skipping small components
         comp_size = np.where(labels_im == comp)[0].shape[0]
-        if comp_size < 100:
+        if comp_size < 200:
                 break
 
         ############################################################
@@ -201,29 +203,31 @@ def extract_features(src, stains, labels_im, biggest_comps, feature_list, brain_
             # skipping tiles with no tumor / brain
             tumor_size = np.where(hp_seg[:,:,0] != 0)[0].shape[0]
             brain_size = np.where(hp_seg[:,:,1] != 0)[0].shape[0]
-            if (tumor_size < 1000) or (brain_size < 1000):
+            if (tumor_size < 22500) or (brain_size < 250000):
                     continue
+            # print('total_tiles:', total_tiles, 'tumor_size:', tumor_size, 'brain_size:', brain_size)
 
-            # seg[labels_im == comp, 2] = 100
+            # seg[labels_im == comp, 2] = .4
             
             # fig, axs = plt.subplots(2, 2)
             # fig.tight_layout()
             # axs[0, 0].imshow(curr_img['main'])
             # axs[0, 0].set_title('Current Image')
             # int_rect = np.array([curr_rect[0] * labels_im.shape[1], curr_rect[1] * labels_im.shape[0], curr_rect[2] * labels_im.shape[1], curr_rect[3] * labels_im.shape[0]], np.uint32)
-            # empty_canvas = np.zeros(seg.shape[0:2],  np.uint8)
-            # seg[:, :, 2] += cv2.rectangle(empty_canvas, int_rect[0:2], int_rect[0:2] + int_rect[2:4], 155, 20)
+            # empty_canvas = np.zeros(seg.shape[0:2],  np.float64)
+            # seg[:, :, 2] += cv2.rectangle(empty_canvas, int_rect[0:2], int_rect[0:2] + int_rect[2:4], .6, 25)
             # axs[0, 1].imshow(seg)
             # axs[0, 1].set_title('Segmented')
             # axs[1, 0].imshow(curr_tumor['main'])
             # axs[1, 0].set_title('Current Tumor Component')
             # axs[1, 1].imshow(hp_seg)
             # axs[1, 1].set_title('High Power Segmented')
-            # plt.show()
+            # fig.savefig('debug/%s_%d.png'%(pref, total_tiles)); plt.close() #plt.show()
             # seg[:, :, 2] = 0
 
             curr_features = calculate_features(hp_seg, feature_list, h_pix_size, w_pix_size, brain_boundary_pts)
             all_features.append(curr_features)
+            total_tiles += 1
 
     all_features = pd.DataFrame.from_dict(all_features)
 
@@ -249,7 +253,7 @@ def calculate_features(object_segment, feature_list, h_pix_size, w_pix_size, bra
     return res
 
 ######## Features
-def _tiled_switch(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+def invasion_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pool_d = 9
     neighber_d = 3
 
@@ -275,20 +279,57 @@ def _tiled_switch(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cach
     switch_seg = np.zeros((*tumor_switch.shape, 3))
     switch_seg[:,:,0] = tumor_switch
     switch_seg[:,:,1] = brain_switch
+
+
+    _, bin_t_switch = cv2.threshold(tumor_switch, .3, 255, cv2.THRESH_BINARY)
+    _, bin_b_switch = cv2.threshold(brain_switch, .3, 255, cv2.THRESH_BINARY)
+
+    dilate_kernel = np.ones((5,5),np.uint8)
+    bin_t_switch = cv2.dilate(bin_t_switch, dilate_kernel, iterations = 1).astype(np.uint8)
+    bin_b_switch = cv2.dilate(bin_b_switch, dilate_kernel, iterations = 1).astype(np.uint8)
+
+    switch_thresh = cv2.bitwise_and(bin_b_switch, bin_b_switch, mask = bin_t_switch)
+    pooled_segments = np.zeros((*switch_thresh.shape, 3), np.uint8)
+    pooled_segments[:,:,0] = bin_tile_tumor * 255
+    pooled_segments[:,:,1] = bin_tile_brain * 255
+    # switch_image = cv2.bitwise_and(pooled_segments, pooled_segments, mask = switch_thresh)
+
+    contours, hierarchy = cv2.findContours(switch_thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    child_contour = hierarchy[0, :,2]
+    contours_length = np.array(list(map(lambda x: cv2.arcLength(x, True), contours)))
+    contours_length[contours_length < 3] = 3
+    contours_area = np.array(list(map(cv2.contourArea, contours)))
+    contours_compactness = (4 * np.pi * contours_area) / (contours_length ** 2)
+    contours = [contours[i] for i in range(len(contours)) if contours_compactness[i] > .5 and child_contour[i] == -1 and contours_area[i] > 50]
+
+    tumor_contours = []
+    
+    for contour in contours:
+        invasion_mask = np.zeros(switch_thresh.shape, np.uint8)
+        cv2.drawContours(invasion_mask, [contour], -1, 255, -1)
+        invasion_mask = cv2.erode(invasion_mask, dilate_kernel, iterations = 1).astype(np.uint8)
+        detected_invasion = cv2.bitwise_and(pooled_segments, pooled_segments, mask = invasion_mask)
+        tumor_area = mask_area_px_sq(detected_invasion[:,:,0])
+        brain_area = mask_area_px_sq(detected_invasion[:,:,1])
+        if tumor_area > brain_area:
+            tumor_contours.append(contour)
+    
+    # found_switches = pooled_segments.copy()
+    # cv2.drawContours(found_switches, tumor_contours, -1, (0, 0, 255), 5)
     
     # fig, axs = plt.subplots(2, 2)
     # fig.tight_layout()
     # axs[0, 0].imshow(obj_segments)
     # axs[0, 0].set_title('Segments')
-    # axs[0, 1].imshow(cont_seg)
-    # axs[0, 1].set_title('Continuous Tiles')
-    # axs[1, 0].imshow(bin_seg)
-    # axs[1, 0].set_title('Binary Tiles')
-    # axs[1, 1].imshow(switch_seg)
-    # axs[1, 1].set_title('Switched Tiles')
+    # axs[0, 1].imshow(switch_image)
+    # axs[0, 1].set_title('Switch Image')
+    # axs[1, 0].imshow(switch_thresh, cmap='gray')
+    # axs[1, 0].set_title('Switch Thresholds')
+    # axs[1, 1].imshow(found_switches)
+    # axs[1, 1].set_title('Found Switches')
     # plt.show()
     
-    return switch_seg
+    return len(tumor_contours)
 
 def mask_area_px_sq(mask):
     return np.where(mask != 0)[0].shape[0]
@@ -327,10 +368,10 @@ def tiled_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
     else:
         tumor_area = _tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
-    if '_tiled_switch' in cache:
-        tiled_switch = cache['_tiled_switch']
+    if 'invasion_count' in cache:
+        tiled_switch = cache['invasion_count']
     else:
-        tiled_switch = _tiled_switch(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+        tiled_switch = invasion_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
 
     return np.where(tiled_switch != 0)[0].shape[0] / (np.sqrt(brain_area) + np.sqrt(tumor_area))
 
@@ -347,10 +388,10 @@ def tiled_sum(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     else:
         tumor_area = _tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
-    if '_tiled_switch' in cache:
-        tiled_switch = cache['_tiled_switch']
+    if 'invasion_count' in cache:
+        tiled_switch = cache['invasion_count']
     else:
-        tiled_switch = _tiled_switch(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
+        tiled_switch = invasion_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
 
     return np.sum(tiled_switch) / (np.sqrt(brain_area) + np.sqrt(tumor_area))
 
@@ -500,20 +541,45 @@ def convex_overlap(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
     return overlap_score
     
 def filled_overlap(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
-    tumor_mask = obj_segments[:,:,0]
-    brain_mask = obj_segments[:,:,1]
+    tumor_mask = obj_segments[:,:,0] * 255
+    brain_mask = obj_segments[:,:,1] * 255
 
-    kernel = np.ones((50, 50),np.uint8)
-    closed_brain = cv2.morphologyEx(brain_mask, cv2.MORPH_CLOSE, kernel) * 255
-    closed_brain = closed_brain.astype(np.uint8)
+    kernel = np.ones((10, 10),np.uint8)
+    denoised_brain = cv2.morphologyEx(brain_mask, cv2.MORPH_OPEN, kernel).astype(np.uint8)
+    denoised_tumor = cv2.morphologyEx(tumor_mask, cv2.MORPH_OPEN, kernel).astype(np.uint8)
 
-    brain_overlap = cv2.bitwise_and(tumor_mask,tumor_mask,mask = closed_brain)
+    kernel = np.ones((40, 40),np.uint8)
+    brain_closing = cv2.morphologyEx(denoised_brain, cv2.MORPH_CLOSE, kernel)
+    # brain_closing = brain_closing.astype(np.uint8)
+    brain_closing[brain_mask != 0] = 0
 
-    filled_area = mask_area_px_sq(closed_brain) - mask_area_px_sq(brain_mask)
-    overlaping_area = mask_area_px_sq(brain_overlap)
-    overlap_score = overlaping_area / filled_area if filled_area != 0 else 0
+    brain_overlap = cv2.bitwise_and(denoised_tumor,denoised_tumor,mask = brain_closing)
 
-    return overlap_score
+    contours, hierarchy = cv2.findContours(brain_overlap, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    parent_contour = hierarchy[0, :,3]
+    contours_area = np.array(list(map(cv2.contourArea, contours)))
+    area_threshold = 625
+    contours = [contours[i] for i in range(len(contours)) if parent_contour[i] == -1 and contours_area[i] > area_threshold]
+    
+    # found_filled_gaps = obj_segments.copy()
+    # cv2.drawContours(found_filled_gaps, contours, -1, (0, 0, 255), -1)
+
+    # closed_view = obj_segments.copy()
+    # closed_view[:,:,2] = brain_overlap
+
+    # fig, axs = plt.subplots(2, 2)
+    # fig.tight_layout()
+    # axs[0, 0].imshow(obj_segments)
+    # axs[0, 0].set_title('Segments')
+    # axs[0, 1].imshow(closed_view)
+    # axs[0, 1].set_title('Closed Brain')
+    # # axs[1, 0].imshow(switch_thresh, cmap='gray')
+    # # axs[1, 0].set_title('Switch Thresholds')
+    # axs[1, 1].imshow(found_filled_gaps)
+    # axs[1, 1].set_title('Found Filled Gaps')
+    # plt.show()
+
+    return len(contours)
 
 def __r_thetas(thetas, tumor_point, brain_pts):
     # To check the collision, we perform a slope calculation
@@ -676,14 +742,14 @@ for src in src_list:
             biggest_comps,
             [
                 _brain_curve,
-                _tiled_switch,
                 _brain_perimeter,
                 _brain_area,
                 _tumor_area,
                 _brain_convex_hull,
                 _brain_largest_area,
-                tiled_count,
-                tiled_sum,
+                invasion_count,
+                # tiled_count,
+                # tiled_sum,
                 brain_compactness,
                 brain_convexity,
                 brain_solidity,
@@ -708,6 +774,7 @@ for src in src_list:
         
         all_features.hist(bins=30, grid=False, xlabelsize=5)
         plt.savefig('steps/%s_features.png'%pref); plt.close() # plt.show()
+        all_features.to_csv('steps/%s_features.csv'%pref, index=False)
 
         if plates_info is None:
             plates_info = features_summary
