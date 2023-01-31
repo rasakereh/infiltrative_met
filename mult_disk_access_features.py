@@ -49,8 +49,8 @@ def read_slide(src, rect=None, size=None, thumbnail_size=None):
     # print("main image read", image.shape, "\n==============")
 
     # I am sure about the indices, although they might seem confusing
-    h_pix_size = 1e6 * scene.resolution[1] * img_size[1] / image.shape[0]
-    w_pix_size = 1e6 * scene.resolution[0] * img_size[0] / image.shape[1]
+    h_pix_size = 1e6 * scene.resolution[1] * rect[3] / image.shape[0]
+    w_pix_size = 1e6 * scene.resolution[0] * rect[2] / image.shape[1]
     
     return {'main': image, 'thumbnail': thumbnail, 'h_pix_size': h_pix_size, 'w_pix_size': w_pix_size}
 
@@ -67,12 +67,16 @@ def color_analysis(image):
 
     return H, tumor_mask2, brain_mask2, immune_mask2
 
-def colorbased_seg(main_img, stains, kern_s = 2, kern_m = 3, kern_b = 4):
+def colorbased_seg(main_img, stains, strict = False, kern_s = 2, kern_m = 3, kern_b = 4):
     pixels = main_img.reshape((-1, 1, 3)) / 255.
     conv_pix = cv2.cvtColor(np.float32(pixels), cv2.COLOR_RGB2Lab)
     conv_stains = cv2.cvtColor(np.float32(stains.reshape((-1, 1, 3))), cv2.COLOR_RGB2Lab)
     color_diffs = np.hstack([np.linalg.norm(conv_pix - stain_col, axis=2).reshape((-1,1)) for stain_col in conv_stains])
     detected_color = np.argmin(color_diffs, axis=1)
+
+    if strict:
+        middle_color = (color_diffs[:, TUMOR_STAIN] / color_diffs[:, BRAIN_STAIN] < 2) & (detected_color == BRAIN_STAIN) & (color_diffs[:, TUMOR_STAIN] < 40)
+        detected_color[middle_color] = BG_STAIN
 
     small_kernel = np.ones((kern_s,kern_s),np.uint8)
     med_kernel = np.ones((kern_m,kern_m),np.uint8)
@@ -106,6 +110,54 @@ def colorbased_seg(main_img, stains, kern_s = 2, kern_m = 3, kern_b = 4):
     seg[:, :, 0] = tumor_mask
     seg[:, :, 1] = brain_mask
     seg[:, :, 2] = immune_mask
+
+    # colordiff2d = color_diffs.reshape((*main_img.shape[0:2], stains.shape[0])).astype(np.uint8)
+
+    # _, axs = plt.subplots(3, 2)
+    # axs[0, 0].imshow(seg)
+    # axs[0, 0].set_title('Current Segmentation')
+    # axs[0, 1].hist(colordiff2d[:,:,0].reshape((-1,)), bins=50)
+    # axs[0, 1].set_title('Stain 0')
+    # axs[1, 0].hist(colordiff2d[:,:,1].reshape((-1,)), bins=50)
+    # axs[1, 0].set_title('Stain 1')
+    # axs[1, 1].hist(colordiff2d[:,:,2].reshape((-1,)), bins=50)
+    # axs[1, 1].set_title('Stain 2')
+    # axs[2, 0].hist(colordiff2d[:,:,3].reshape((-1,)), bins=50)
+    # axs[2, 0].set_title('Stain 3')
+    # axs[2, 1].hist(colordiff2d[:,:,4].reshape((-1,)), bins=50)
+    # axs[2, 1].set_title('Stain 4')
+
+    # def update_hist(_):
+    #     x0 = axs[0, 0].get_xlim()[0]
+    #     y0 = axs[0, 0].get_ylim()[1]
+    #     x1 = axs[0, 0].get_xlim()[1]
+    #     y1 = axs[0, 0].get_ylim()[0]
+    #     x0,y0, x1,y1 = np.round([x0, y0, x1, y1]).astype(int)
+    #     zoomed_diffs = colordiff2d[y0:y1, x0:x1, :]
+    #     axs[0, 1].cla()
+    #     axs[0, 1].hist(zoomed_diffs[:,:,0].reshape((-1,)), bins=50)
+    #     axs[0, 1].set_title('Stain 0')
+    #     axs[0, 1].figure.canvas.draw_idle()
+    #     axs[1, 0].cla()
+    #     axs[1, 0].hist(zoomed_diffs[:,:,1].reshape((-1,)), bins=50)
+    #     axs[1, 0].set_title('Stain 1')
+    #     axs[1, 0].figure.canvas.draw_idle()
+    #     axs[1, 1].cla()
+    #     axs[1, 1].hist(zoomed_diffs[:,:,2].reshape((-1,)), bins=50)
+    #     axs[1, 1].set_title('Stain 2')
+    #     axs[1, 1].figure.canvas.draw_idle()
+    #     axs[2, 0].cla()
+    #     axs[2, 0].hist(zoomed_diffs[:,:,3].reshape((-1,)), bins=50)
+    #     axs[2, 0].set_title('Stain 3')
+    #     axs[2, 0].figure.canvas.draw_idle()
+    #     axs[2, 1].cla()
+    #     axs[2, 1].hist(zoomed_diffs[:,:,4].reshape((-1,)), bins=50)
+    #     axs[2, 1].set_title('Stain 4')
+    #     axs[2, 1].figure.canvas.draw_idle()
+    # axs[0, 0].callbacks.connect('xlim_changed', update_hist)
+    # axs[0, 0].callbacks.connect('ylim_changed', update_hist)
+
+    # plt.show()
 
     return seg, tumor_mask, brain_mask, immune_mask
 
@@ -198,7 +250,8 @@ def extract_features(src, stains, labels_im, biggest_comps, feature_list, brain_
             h_pix_size, w_pix_size = curr_tumor['h_pix_size'], curr_tumor['w_pix_size']
 
             # Segmenting high power tumor
-            hp_seg, _, _, _ = colorbased_seg(curr_tumor['main'], stains, kern_s=3, kern_m=4, kern_b=5)
+            hp_seg, _, _, _ = colorbased_seg(curr_tumor['main'], stains, strict=True, kern_s=4, kern_m=6, kern_b=8)
+            hp_seg = denoise_segments(hp_seg, kernel = np.ones((10, 10),np.uint8))
 
             # skipping tiles with no tumor / brain
             tumor_size = np.where(hp_seg[:,:,0] != 0)[0].shape[0]
@@ -252,6 +305,14 @@ def calculate_features(object_segment, feature_list, h_pix_size, w_pix_size, bra
     
     return res
 
+def denoise_segments(segments, kernel):
+    segments[:,:,0] = cv2.morphologyEx(segments[:,:,0], cv2.MORPH_OPEN, kernel)
+    segments[:,:,0] = cv2.morphologyEx(segments[:,:,0], cv2.MORPH_CLOSE, kernel)
+    segments[:,:,1] = cv2.morphologyEx(segments[:,:,1], cv2.MORPH_OPEN, kernel)
+    segments[:,:,1] = cv2.morphologyEx(segments[:,:,1], cv2.MORPH_CLOSE, kernel)
+
+    return segments
+
 ######## Features
 def invasion_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pool_d = 9
@@ -295,6 +356,9 @@ def invasion_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
     # switch_image = cv2.bitwise_and(pooled_segments, pooled_segments, mask = switch_thresh)
 
     contours, hierarchy = cv2.findContours(switch_thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return {'cnt': 0, 'min_area': 0, 'max_area': 0, 'med_area': 0}
+
     child_contour = hierarchy[0, :,2]
     contours_length = np.array(list(map(lambda x: cv2.arcLength(x, True), contours)))
     contours_length[contours_length < 3] = 3
@@ -314,6 +378,12 @@ def invasion_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
         if tumor_area > brain_area:
             tumor_contours.append(contour)
     
+    if len(tumor_contours) == 0:
+        return {'cnt': 0, 'min_area': 0, 'max_area': 0, 'med_area': 0}
+    
+    pix_area = h_pix_size * w_pix_size
+    contour_areas = np.array(list(map(cv2.contourArea, tumor_contours))) * pix_area
+    
     # found_switches = pooled_segments.copy()
     # cv2.drawContours(found_switches, tumor_contours, -1, (0, 0, 255), 5)
     
@@ -329,16 +399,16 @@ def invasion_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
     # axs[1, 1].set_title('Found Switches')
     # plt.show()
     
-    return len(tumor_contours)
+    return {'cnt': len(tumor_contours), 'min_area': np.min(contour_areas), 'max_area': np.max(contour_areas), 'med_area': np.median(contour_areas)}
 
 def mask_area_px_sq(mask):
     return np.where(mask != 0)[0].shape[0]
 
-def _brain_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+def whole_brain_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pix_area = h_pix_size * w_pix_size
     return mask_area_px_sq(obj_segments[:, :, 1]) * pix_area
 
-def _tumor_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+def whole_tumor_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pix_area = h_pix_size * w_pix_size
     return mask_area_px_sq(obj_segments[:, :, 0]) * pix_area
 
@@ -358,15 +428,15 @@ def _brain_largest_area(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts
 def tiled_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pix_area = h_pix_size * w_pix_size
     
-    if '_brain_area' in cache:
-        brain_area = cache['_brain_area'] / pix_area
+    if 'whole_brain_area' in cache:
+        brain_area = cache['whole_brain_area'] / pix_area
     else:
-        brain_area = _brain_area(obj_segments, 1, 1, brain_boundary_pts, cache)
+        brain_area = whole_brain_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
-    if '_tumor_area' in cache:
-        tumor_area = cache['_tumor_area'] / pix_area
+    if 'whole_tumor_area' in cache:
+        tumor_area = cache['whole_tumor_area'] / pix_area
     else:
-        tumor_area = _tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
+        tumor_area = whole_tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
     if 'invasion_count' in cache:
         tiled_switch = cache['invasion_count']
@@ -378,15 +448,15 @@ def tiled_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache)
 def tiled_sum(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pix_area = h_pix_size * w_pix_size
     
-    if '_brain_area' in cache:
-        brain_area = cache['_brain_area'] / pix_area
+    if 'whole_brain_area' in cache:
+        brain_area = cache['whole_brain_area'] / pix_area
     else:
-        brain_area = _brain_area(obj_segments, 1, 1, brain_boundary_pts, cache)
+        brain_area = whole_brain_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
-    if '_tumor_area' in cache:
-        tumor_area = cache['_tumor_area'] / pix_area
+    if 'whole_tumor_area' in cache:
+        tumor_area = cache['whole_tumor_area'] / pix_area
     else:
-        tumor_area = _tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
+        tumor_area = whole_tumor_area(obj_segments, 1, 1, brain_boundary_pts, cache)
     
     if 'invasion_count' in cache:
         tiled_switch = cache['invasion_count']
@@ -556,10 +626,19 @@ def filled_overlap(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
     brain_overlap = cv2.bitwise_and(denoised_tumor,denoised_tumor,mask = brain_closing)
 
     contours, hierarchy = cv2.findContours(brain_overlap, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return {'cnt': 0, 'min_area': 0, 'max_area': 0, 'med_area': 0}
+
     parent_contour = hierarchy[0, :,3]
     contours_area = np.array(list(map(cv2.contourArea, contours)))
     area_threshold = 625
     contours = [contours[i] for i in range(len(contours)) if parent_contour[i] == -1 and contours_area[i] > area_threshold]
+
+    if len(contours) == 0:
+        return {'cnt': 0, 'min_area': 0, 'max_area': 0, 'med_area': 0}
+    
+    pix_area = h_pix_size * w_pix_size
+    contour_areas = np.array(list(map(cv2.contourArea, contours))) * pix_area
     
     # found_filled_gaps = obj_segments.copy()
     # cv2.drawContours(found_filled_gaps, contours, -1, (0, 0, 255), -1)
@@ -579,7 +658,7 @@ def filled_overlap(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
     # axs[1, 1].set_title('Found Filled Gaps')
     # plt.show()
 
-    return len(contours)
+    return {'cnt': len(contours), 'min_area': np.min(contour_areas), 'max_area': np.max(contour_areas), 'med_area': np.median(contour_areas)}
 
 def __r_thetas(thetas, tumor_point, brain_pts):
     # To check the collision, we perform a slope calculation
@@ -743,8 +822,8 @@ for src in src_list:
             [
                 _brain_curve,
                 _brain_perimeter,
-                _brain_area,
-                _tumor_area,
+                whole_brain_area,
+                whole_tumor_area,
                 _brain_convex_hull,
                 _brain_largest_area,
                 invasion_count,
