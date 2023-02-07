@@ -401,6 +401,123 @@ def invasion_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
     
     return {'cnt': len(tumor_contours), 'min_area': np.min(contour_areas), 'max_area': np.max(contour_areas), 'med_area': np.median(contour_areas)}
 
+def delaunay_score(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    pix_dim = (h_pix_size + w_pix_size) / 2
+    fill_number = pix_dim * (obj_segments.shape[0] + obj_segments.shape[1])/2
+
+    open_kernel = np.ones((20,20),np.uint8)
+    close_kernel = np.ones((200,200),np.uint8)
+    denoised_brain = cv2.morphologyEx(obj_segments[:,:,1] * 255, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
+    compact_brain = cv2.morphologyEx(denoised_brain, cv2.MORPH_CLOSE, close_kernel).astype(np.uint8)
+
+    open_kernel = np.ones((20,20),np.uint8)
+    close_kernel = np.ones((30,30),np.uint8)
+    denoised_tumor = cv2.morphologyEx(obj_segments[:,:,0] * 255, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
+    compact_tumor = cv2.morphologyEx(denoised_tumor, cv2.MORPH_CLOSE, close_kernel).astype(np.uint8)
+
+    invaded_tumors = cv2.bitwise_and(compact_tumor, compact_tumor,mask = compact_brain)
+
+    contours, hierarchy = cv2.findContours(invaded_tumors, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return {'min': fill_number, 'quartile1': fill_number, 'median': fill_number, 'quartile3': fill_number, 'max': fill_number}
+
+    child_contour = hierarchy[0, :,2]
+    contours_area = np.array(list(map(cv2.contourArea, contours)))
+    contours = [contours[i] for i in range(len(contours)) if child_contour[i] == -1 and contours_area[i] > 50]
+
+    if len(contours) < 3:
+        return {'min': fill_number, 'quartile1': fill_number, 'median': fill_number, 'quartile3': fill_number, 'max': fill_number}
+    
+    points = []
+    for contour in contours:
+        M = cv2.moments(contour)
+        if M['m00'] != 0:
+            cx = int(M['m10']/M['m00'])
+            cy = int(M['m01']/M['m00'])
+            points.append((cx, cy))
+    points = np.array(points, np.float32)
+    rect = cv2.boundingRect(points)
+    subdiv = cv2.Subdiv2D(rect)
+    for p in points:
+        subdiv.insert(p)
+    triangleList = subdiv.getTriangleList()
+
+    all_dists = []
+    for t in triangleList:
+        head_points = np.array([
+            [t[0], t[1]],
+            [t[2], t[3]],
+            [t[4], t[5]]
+        ])
+        tail_points = np.array([
+            [t[2], t[3]],
+            [t[4], t[5]],
+            [t[0], t[1]]
+        ])
+        dists = np.linalg.norm(head_points - tail_points, axis=1)
+
+        all_dists.append(dists)
+    all_dists = np.array(all_dists).reshape((-1,))
+
+    all_dists = all_dists * pix_dim
+    
+    quantiles = np.quantile(all_dists, [0, .25, .5, .75, 1])
+
+    # plt.imshow(obj_segments)
+    # for t in triangleList:
+    #     pt1 = (t[0], t[1])
+    #     pt2 = (t[2], t[3])
+    #     pt3 = (t[4], t[5])
+    #     plt.plot([pt1[0], pt2[0], pt3[0], pt1[0]], [pt1[1], pt2[1], pt3[1], pt1[1]])
+
+    # plt.show()
+    
+    return {'min': quantiles[0], 'quartile1': quantiles[1], 'median': quantiles[2], 'quartile3': quantiles[3], 'max': quantiles[4]}
+
+def tumor_components(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    open_kernel = np.ones((20,20),np.uint8)
+    close_kernel = np.ones((200,200),np.uint8)
+    denoised_brain = cv2.morphologyEx(obj_segments[:,:,1] * 255, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
+    compact_brain = cv2.morphologyEx(denoised_brain, cv2.MORPH_CLOSE, close_kernel).astype(np.uint8)
+
+    open_kernel = np.ones((20,20),np.uint8)
+    close_kernel = np.ones((30,30),np.uint8)
+    denoised_tumor = cv2.morphologyEx(obj_segments[:,:,0] * 255, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
+    compact_tumor = cv2.morphologyEx(denoised_tumor, cv2.MORPH_CLOSE, close_kernel).astype(np.uint8)
+
+    invaded_tumors = cv2.bitwise_and(compact_tumor, compact_tumor,mask = compact_brain)
+
+    contours, hierarchy = cv2.findContours(invaded_tumors, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return {'cnt': 0, 'min_area': 0, 'max_area': 0, 'med_area': 0}
+
+    child_contour = hierarchy[0, :,2]
+    contours_area = np.array(list(map(cv2.contourArea, contours)))
+    contours = [contours[i] for i in range(len(contours)) if child_contour[i] == -1 and contours_area[i] > 50]
+
+    if len(contours) == 0:
+        return {'cnt': 0, 'min_area': 0, 'max_area': 0, 'med_area': 0}
+    
+    pix_area = h_pix_size * w_pix_size
+    contour_areas = np.array(list(map(cv2.contourArea, contours))) * pix_area
+    
+    # found_components = obj_segments.copy()
+    # cv2.drawContours(found_components, contours, -1, (0, 0, 255), 50)
+    
+    # fig, axs = plt.subplots(2, 2)
+    # fig.tight_layout()
+    # axs[0, 0].imshow(obj_segments)
+    # axs[0, 0].set_title('Segments')
+    # # axs[0, 1].imshow(switch_image)
+    # # axs[0, 1].set_title('Switch Image')
+    # # axs[1, 0].imshow(switch_thresh, cmap='gray')
+    # # axs[1, 0].set_title('Switch Thresholds')
+    # axs[1, 1].imshow(found_components)
+    # axs[1, 1].set_title('Found components')
+    # plt.show()
+    
+    return {'cnt': len(contours), 'min_area': np.min(contour_areas), 'max_area': np.max(contour_areas), 'med_area': np.median(contour_areas)}
+
 def mask_area_px_sq(mask):
     return np.where(mask != 0)[0].shape[0]
 
@@ -827,6 +944,8 @@ for src in src_list:
                 _brain_convex_hull,
                 _brain_largest_area,
                 invasion_count,
+                delaunay_score,
+                tumor_components,
                 # tiled_count,
                 # tiled_sum,
                 brain_compactness,
