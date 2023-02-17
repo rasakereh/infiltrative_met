@@ -436,6 +436,12 @@ def delaunay_score(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
             cy = int(M['m01']/M['m00'])
             points.append((cx, cy))
     points = np.array(points, np.float32)
+
+    if len(contours) == 3:
+        all_dists = np.linalg.norm(points[[0,1,2],:] - points[[1,2,0],:], axis=1)
+        quantiles = np.quantile(all_dists, [0, .25, .5, .75, 1])
+        return {'min': quantiles[0], 'quartile1': quantiles[1], 'median': quantiles[2], 'quartile3': quantiles[3], 'max': quantiles[4]}
+
     rect = cv2.boundingRect(points)
     subdiv = cv2.Subdiv2D(rect)
     for p in points:
@@ -517,6 +523,113 @@ def tumor_components(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, c
     # plt.show()
     
     return {'cnt': len(contours), 'min_area': np.min(contour_areas), 'max_area': np.max(contour_areas), 'med_area': np.median(contour_areas)}
+
+def interface_ellipse(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    tumor_mask = (obj_segments[:,:,0] * 255).astype(np.uint8)
+    brain_mask = (obj_segments[:,:,1] * 255).astype(np.uint8)
+    open_kernel = np.ones((20,20),np.uint8)
+    dilate_kernel = np.ones((50,50),np.uint8)
+    denoised_tumor = cv2.morphologyEx(tumor_mask, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
+    extended_tumor = cv2.dilate(denoised_tumor, dilate_kernel, iterations=1).astype(np.uint8)
+    denoised_brain = cv2.morphologyEx(brain_mask, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
+    extended_brain = cv2.dilate(denoised_brain, dilate_kernel, iterations=1).astype(np.uint8)
+
+    detected_interface = cv2.bitwise_and(extended_tumor, extended_tumor, mask = extended_brain)
+
+    contours, _  = cv2.findContours(detected_interface, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # final_contours = []
+    final_eccentricity = []
+    final_areas = []
+
+    pix_area = h_pix_size * w_pix_size
+
+    for cnt in contours:
+        if(cnt.shape[0] < 5): continue
+        contour_area = cv2.contourArea(cnt)
+        if(contour_area < 20): continue
+        fitted_ellipse = cv2.fitEllipse(cnt) # center point, axes lengths, and orientation angle
+        b_e, a_e = fitted_ellipse[1]
+        b_e, a_e = min(b_e, a_e), max(b_e, a_e)
+        c_e = np.sqrt(1 - (b_e/a_e)**2)
+        eccentricity = c_e/a_e
+        ellipse_area = np.pi * a_e * b_e
+        if ellipse_area / contour_area > 10: continue
+        final_eccentricity.append(eccentricity)
+        # final_contours.append(cnt)
+        final_areas.append(contour_area * pix_area)
+        # detected_interface = cv2.ellipse(detected_interface, fitted_ellipse, 255, 10)
+
+    # interfaced_seg = obj_segments.copy()
+    # interfaced_seg[:,:,2] = detected_interface / 255.
+
+    # extendeds = obj_segments.copy()
+    # extendeds[:,:,0] = extended_tumor / 255.
+    # extendeds[:,:,1] = extended_brain / 255.
+
+    # fig, axs = plt.subplots(2, 2)
+    # fig.tight_layout()
+    # axs[0, 0].imshow(obj_segments)
+    # axs[0, 0].set_title('Segments')
+    # axs[0, 1].imshow(extendeds)
+    # axs[0, 1].set_title('Extendeds')
+    # # axs[1, 0].imshow(switch_thresh, cmap='gray')
+    # # axs[1, 0].set_title('Switch Thresholds')
+    # axs[1, 1].imshow(interfaced_seg)
+    # axs[1, 1].set_title('interfaced_seg')
+    # plt.show()
+
+    quantiles = [.1, .5, .9]
+    eccent_quants = np.quantile(final_eccentricity, quantiles)
+    area_quants = np.quantile(final_areas, quantiles)
+
+    return {
+        **{'eccent_quants_' + str(quantiles[i]): eccent_quants[i] for i in range(len(quantiles))},
+        **{'area_quants_' + str(quantiles[i]): area_quants[i] for i in range(len(quantiles))},
+    }
+
+def cooccurrence_mat(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    pool_d = 50
+
+    cont_tile_tumor = skimage.measure.block_reduce(obj_segments[:, :, 0], pool_d, np.mean)
+    cont_tile_brain = skimage.measure.block_reduce(obj_segments[:, :, 1], pool_d, np.mean)
+
+    unwanted_tiles = np.logical_and(cont_tile_tumor < .1, cont_tile_brain < .1)
+    cont_tile_tumor[unwanted_tiles] = 1e-3
+    cont_tile_brain[unwanted_tiles] = 1e-3
+
+    proportion = cont_tile_brain / (cont_tile_brain + cont_tile_tumor)
+
+    unwanted_up = unwanted_tiles[:-1, :]
+    base4up = (proportion[:-1, :])[~unwanted_up]
+    proportion_up = (proportion[1:, :])[~unwanted_up]
+    pair_up = np.concatenate((base4up.reshape((-1, 1)), proportion_up.reshape((-1, 1))), axis=1)
+
+    unwanted_left = unwanted_tiles[:, :-1]
+    base4left = (proportion[:, :-1])[~unwanted_left]
+    proportion_left = (proportion[:, 1:])[[~unwanted_left]]
+    pair_left = np.concatenate((base4left.reshape((-1, 1)), proportion_left.reshape((-1, 1))), axis=1)
+
+    all_pairs = np.vstack((pair_up, pair_left))
+    all_pairs = np.digitize(all_pairs, [-.1, .33, .67, 1.1]) - 1
+    all_unique_pairs, all_unique_counts = np.unique(all_pairs, axis=0, return_counts=True)
+    all_unique_counts = all_unique_counts
+
+    result = np.zeros((3, 3))
+    result[all_unique_pairs[:, 0], all_unique_pairs[:, 1]] = all_unique_counts
+    result = result.reshape((-1,))[1:-1]
+    result = result / np.sum(result)
+    
+    # fig, axs = plt.subplots(2)
+    # fig.tight_layout()
+    # axs[0].imshow(obj_segments)
+    # axs[0].set_title('Segments')
+    # axs[1].imshow(result.reshape((1, -1)), cmap='gray')
+    # axs[1].set_title('Co-occurrence')
+    # plt.show()
+    
+    return [*result]
+
 
 def mask_area_px_sq(mask):
     return np.where(mask != 0)[0].shape[0]
@@ -946,6 +1059,8 @@ for src in src_list:
                 invasion_count,
                 delaunay_score,
                 tumor_components,
+                interface_ellipse,
+                cooccurrence_mat,
                 # tiled_count,
                 # tiled_sum,
                 brain_compactness,
