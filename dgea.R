@@ -9,65 +9,95 @@ require(kernlab)
 require(infotheo)
 require(umap)
 require(limma)
+require(reshape2)
+require(NMF)
+require(GGally)
+require(pheatmap)
+require(boot)
 
 cluster.cnt <- 3
 
-features <- read.csv('reshaped_dual.csv')
-grades <- features %>% select(case, domin_s, d_per, high_s, h_per, total)
-features <- features %>% select(-domin_s, -d_per, -high_s, -h_per, -total)
-no.var.cols <- colnames(features)[features %>% apply(2, sd) == 0]
-features <- features %>% select(-all_of(no.var.cols)) %>%
-  select(-ends_with('_count')) #%>% select(-contains('_min')) %>% select(-contains('_max'))
-# features <- features %>% select(matches('(case|nearest|surroundedness|overlap)'))
+grades <- read.csv('new_grades.csv')
 
-########## Normalization ##########
-anonym.feats <- features %>% select(-case) %>% t() %>% as.data.frame()
-log.feats <- log(anonym.feats - min(anonym.feats) + .01)
-# log.feats <- normalizeQuantiles(log.feats)
-log.features <- log.feats %>% t %>% as.data.frame %>% mutate(case = features$case, .before=everything())
-rownames(log.features) <- NULL
+z.normalization <- function(dataset){
+  col.n <- colnames(dataset)
+  row.n <- rownames(dataset)
+  
+  z.normed <- dataset %>% t %>% apply(2, scale) %>% t
+  colnames(z.normed) <- col.n
+  rownames(z.normed) <- row.n
+  
+  z.normed
+}
 
-features <- log.features
-###################################
+reduceDim.sd <- function(mat, final.dim=1000)
+{
+  genes <- apply(mat, 1, function(x){abs(sd(x, na.rm=T))}) %>% sort(decreasing=T) %>% names()
+  mat[sort(genes[1:final.dim]),]
+}
 
-pca_res <- prcomp(features %>% select(-case), scale.=T)$x
-pca_feat <- data.frame(
-  case = features$case,
-  pca_res,
-  invasive = cut(grades$total, quantile(grades$total, (0:cluster.cnt)/cluster.cnt), right=F, include.lowest=T) %>% as.integer %>% as.factor()#ifelse(grades$domin_s == 1, 'minimal', ifelse(grades$domin_s == 2, 'moderate', 'high')) %>% as.factor()
-)
+feature.files <- list.files(path='steps', pattern='*.csv')
+indiv.features <- lapply(feature.files, function(file.name){
+  features.to.exclude <- c('delaunay_score_max')
+  case <- str_split(file.name, '_')[[1]][1] %>% substr(3, 5) %>% as.integer()
+  csv.file <- read.csv(paste0('steps/', file.name))
+  csv.file <- csv.file %>% mutate(case = case, part = 0:(n()-1), .before=everything())
+  csv.file[,5:ncol(csv.file)] <- sqrt(csv.file[,5:ncol(csv.file)])
+  
+  csv.file %>% select(-all_of(features.to.exclude))
+})
+indiv.features <- Reduce(rbind.data.frame, indiv.features)
 
+############### TODO, IMPOOOOOOORTTAAAANNNT
+indiv.features[is.na(indiv.features)] <- 0
+############### TODO, IMPOOOOOOORTTAAAANNNT
 
-# specc(pca_feat %>% select(-case, -invasive), centers=2)
-
-mutinformation(pca_feat %>% select(PC1, PC2, PC3) %>% discretize, discretize(pca_feat$invasive))
-mutinformation(pca_feat %>% select(-case, -invasive) %>% discretize, discretize(pca_feat$invasive))
-
-patient.cor <- as.dist(1 - cor(t(pca_feat %>% select(-case, -invasive))))
-patient.cor <- as.dist(1 - cor(t(pca_feat %>% select(PC1, PC2, PC3))))
-pc.based.clust <- hclust(patient.cor)
-plot(pc.based.clust)
-patient.groups <- cutree(pc.based.clust, k=cluster.cnt)
-
-pca_feat <- cbind.data.frame(pca_feat, estimated=as.factor(patient.groups))
-umap_feat <- umap(features %>% select(-case))$layout %>% as.data.frame()
-umap_feat <- cbind.data.frame(umap_feat, invasive=pca_feat$invasive)
-
-# ggplot(pca_feat, aes(PC1, PC2, col=invasive, shape=estimated)) + geom_point(size=5) + scale_shape_manual(values=c(0, 1, 2, 5))
-ggplot(pca_feat, aes(PC1, PC2, col=invasive)) + geom_point(size=5)
-ggplot(umap_feat, aes(V1, V2, col=invasive)) + geom_point(size=5)
-conf.mat <- confusionMatrix(
-  table(
-    as.factor(as.integer(pca_feat$estimated)),
-    as.factor(as.integer(pca_feat$invasive))
-  ),
-  positive = '4',
-  mode='prec_recall'
-)
+indiv.features[5:ncol(indiv.features)] <- indiv.features[5:ncol(indiv.features)] %>%
+  t %>% z.normalization %>% normalizeQuantiles %>% t
 
 
-###############################
-# load series and platform data from GEO
+death_date <- read.csv('../data/death_date.csv')
+death_date$Date.of.secondary.Dx <- as.Date(death_date$Date.of.secondary.Dx, format = "%m/%d/%Y")
+death_date$Date.of.Death...Cerner. <- as.Date(death_date$Date.of.Death...Cerner., format = "%Y-%m-%d")
+death_date <- death_date %>% mutate(survival = round(
+  as.numeric(difftime(Date.of.Death...Cerner., Date.of.secondary.Dx, units = "days")
+  )/30.44)) %>% rename(case = Study..) %>%
+  select(case, survival) %>% mutate(cencored = is.na(survival)) %>%
+  mutate(case = as.integer(substr(case, 5, 7)))
+
+################################################################################
+interface.percent <- indiv.features %>% select(case, part, whole_brain_area, whole_tumor_area) %>%
+  mutate(interface = sqrt(mapply(min, whole_brain_area, whole_tumor_area))) %>%
+  group_by(case) %>% mutate(percent = interface / sum(interface)) %>% ungroup()
+
+plate.summary <- unique(indiv.features$case) %>% lapply(function(case.num){
+  feature.summary <- indiv.features %>% filter(case == case.num) %>%
+    select(-case, -part, -whole_brain_area, -whole_tumor_area) %>%
+    apply(2, function(col){quantile(col)}) %>% melt() %>%
+    mutate(feature = mapply(paste, Var2, Var1), .before=everything()) %>%
+    select(-Var2, -Var1) %>% t
+  feature.names <- c('case', feature.summary[1,])
+  feature.summary <- c(case.num, as.numeric(feature.summary[2,])) %>% matrix(nrow=1) %>% as.data.frame()
+  colnames(feature.summary) <- feature.names
+  
+  feature.summary
+})
+plate.summary <- Reduce(rbind.data.frame, plate.summary)
+
+###############################################
+plate.summary <- plate.summary %>% inner_join(death_date, by='case') %>%
+  mutate(available=!cencored) %>% select(-cencored, -case)
+
+
+plate.cor <- as.dist(1 - cor(plate.summary %>% select(-survival, -available)))
+plate.clust <- hclust(plate.cor)
+plate.groups <- cutree(plate.clust, k=16)
+# plate.PC <- 1:max(plate.groups) %>% sapply(function(clust){
+#   sub.feats <- plate.summary[names(plate.groups[plate.groups == clust])] %>% prcomp()
+#   sub.feats$x[,'PC1']
+# }) %>% as.data.frame() %>%
+#   mutate(survival=plate.summary$survival, available=plate.summary$available)
+
 annot <- read.csv("../data/annot.csv")
 annot <- annot %>% filter(!is.na(ROI..label.))
 
@@ -77,63 +107,179 @@ annot2smpl <- cbind.data.frame(annots=annot2smpl, groups=as.factor(gsub("[0-9]*"
 q3 <- read.csv("../data/Q3.csv", check.names=F)
 rownames(q3)<-(q3$TargetName)
 q3 <- q3 %>% select(-TargetName)
-q3 <- log(q3)
-pca.dim <- 5
-pca <- prcomp(t(q3))
-pca.rotation <- pca$r
-pca <- cbind.data.frame(pca$x[,1:pca.dim], annots=rownames(pca$x))
-pca <- inner_join(pca, annot2smpl) %>% select(-annots) %>% filter(groups %in% c('LB', 'ME', 'TIL-B'))
-pca <- inner_join(pca, pca_feat %>% select(case, invasive, estimated), c(case='case'))
+q3 <- normalizeQuantiles(log(q3))
 
-lb.pca <- pca %>% filter(groups == 'LB')
-ggplot(lb.pca, aes(PC1, PC2, col=invasive, shape=estimated)) + geom_point(size=5)
+brain.label <- annot2smpl %>% filter(groups=='LB') %>% select(annots, case) %>%
+  inner_join(grades, by='case') %>% arrange(case)
+me.label <- annot2smpl %>% filter(groups=='ME') %>% select(annots, case) %>%
+  inner_join(grades, by='case') %>% arrange(case)
+tilb.label <- annot2smpl %>% filter(groups=='TIL-B') %>% select(annots, case) %>%
+  inner_join(grades, by='case') %>% arrange(case)
 
-do.DGEA <- function(invasive.data, invasive.labels, invasive.annots){
-  invasive.groups <- rep("g2", length(invasive.labels))
-  names(invasive.groups) <- invasive.annots
-  invasive.groups[as.integer(invasive.labels) == 1] <- "g1"
-  names(invasive.groups) <- NULL
+brain.expr <- reduceDim.sd(q3[brain.label$annots], final.dim=1500)
+nmf.brain.expr <- nmf(brain.expr, 10, method = 'snmf/l', seed=1401)
+pheatmap(nmf.brain.expr@fit@W)
+ggpairs(as.data.frame(nmf.brain.expr@fit@H %>% t), mapping = aes(col=factor(brain.label$domin_s)), columns = 1:10)
+ggpairs(as.data.frame(nmf.brain.expr@fit@H %>% t), mapping = aes(col=factor(brain.label$high_s)), columns = 1:10)
+nmf.brain.pca <- prcomp(nmf.brain.expr@fit@H %>% t, scale. = T)$x %>% as.data.frame()
+ggplot(nmf.brain.pca, aes(PC1, PC2, col=factor(brain.label$domin_s))) + geom_point(size=3)
+ggplot(nmf.brain.pca, aes(PC1, PC2, col=factor(brain.label$high_s))) + geom_point(size=3)
+nmf.brain.expr@fit@H %>% t %>% as.data.frame() %>%
+  mutate(case=brain.label$case, ds=brain.label$domin_s) %>% filter(ds != 3) %>%
+  melt(id=c('case', 'ds')) %>%
+  ggplot(aes(variable, value, fill=factor(ds))) + geom_boxplot()
+nmf.brain.expr@fit@H %>% t %>% as.data.frame() %>%
+  mutate(case=brain.label$case, hs=brain.label$high_s) %>%
+  melt(id=c('case', 'hs')) %>%
+  ggplot(aes(variable, value, fill=factor(hs))) + geom_boxplot()
+
+prcomp(brain.expr %>% t, scale. = T)$x %>% as.data.frame() %>% 
+  ggplot(aes(PC1, PC2, col=factor(brain.label$high_s))) + geom_point(size=3)
+
+
+me.expr <- reduceDim.sd(q3[me.label$annots], final.dim=1500)
+nmf.me.expr <- nmf(me.expr, 10, method = 'snmf/l', seed=1401)
+pheatmap(nmf.me.expr@fit@W)
+ggpairs(as.data.frame(nmf.me.expr@fit@H %>% t), mapping = aes(col=factor(me.label$domin_s)), columns = 1:10)
+ggpairs(as.data.frame(nmf.me.expr@fit@H %>% t), mapping = aes(col=factor(me.label$high_s)), columns = 1:10)
+nmf.me.pca <- prcomp(nmf.me.expr@fit@H %>% t, scale. = T)$x %>% as.data.frame()
+ggplot(nmf.me.pca, aes(PC1, PC2, col=factor(me.label$domin_s))) + geom_point(size=3)
+ggplot(nmf.me.pca, aes(PC1, PC2, col=factor(me.label$high_s))) + geom_point(size=3)
+
+
+tilb.expr <- reduceDim.sd(q3[tilb.label$annots], final.dim=1500)
+nmf.tilb.expr <- nmf(tilb.expr, 5, method = 'snmf/l', seed=1401)
+pheatmap(nmf.tilb.expr@fit@W)
+ggpairs(as.data.frame(nmf.tilb.expr@fit@H %>% t), mapping = aes(col=factor(tilb.label$domin_s)), columns = 1:5)
+ggpairs(as.data.frame(nmf.tilb.expr@fit@H %>% t), mapping = aes(col=factor(tilb.label$high_s)), columns = 1:5)
+nmf.tilb.pca <- prcomp(nmf.tilb.expr@fit@H %>% t, scale. = T)$x %>% as.data.frame()
+ggplot(nmf.tilb.pca, aes(PC1, PC2, col=factor(tilb.label$domin_s))) + geom_point(size=3)
+ggplot(nmf.tilb.pca, aes(PC1, PC2, col=factor(tilb.label$high_s))) + geom_point(size=3)
+
+
+get.relevant.factors2 <- function(nmf.expr, patient.groups){
+  single.factor.effect <- nmf.expr %>% apply(2, function(factor.i){
+    group.a <- factor.i[patient.groups == levels(patient.groups)[1]]
+    group.b <- factor.i[patient.groups == levels(patient.groups)[2]]
+    ks.test(group.a, group.b)$p.value #t.test, ks.test, hv.test
+  }) %>% sort()
   
-  # assign samples to groups and set up design matrix
-  gs <- factor(invasive.groups)
-  design <- model.matrix(~gs + 0, invasive.data)
-  groups <- levels(gs)
-  colnames(design) <- groups
-  
-  fit <- lmFit(invasive.data, design)  # fit linear model
-  
-  # set up contrasts of interest and recalculate model coefficients
-  cts <- paste(groups[1], groups[2], sep="-")
-  cont.matrix <- makeContrasts(contrasts=cts, levels=design)
-  fit2 <- contrasts.fit(fit, cont.matrix)
-  
-  # compute statistics and table of top significant genes
-  fit2 <- eBayes(fit2, 0.01)
-  tT <- topTable(fit2, adjust="fdr", sort.by="B", number=100)
-  
-  tT
+  return(single.factor.effect)
 }
 
-invasive.labels <- annot2smpl %>%
-  inner_join(pca_feat, c(case = "case")) %>%
-  filter(groups=='ME') %>% select(annots, invasive, estimated) %>%
-  mutate(invasive = as.factor(invasive))
-invasive.data <- (q3[invasive.labels$annots])
-colnames(invasive.data) <- make.names(colnames(invasive.data))
-
-tT.ME.real <- do.DGEA(invasive.data, invasive.labels$invasive, invasive.labels$annots)
-tT.ME.estimated <- do.DGEA(invasive.data, invasive.labels$estimated, invasive.labels$annots)
+nmf.brain.expr@fit@H %>% t %>% as.data.frame %>%
+  filter(brain.label$domin_s != 3) %>%
+  get.relevant.factors2(factor(brain.label$domin_s[brain.label$domin_s != 3]))
 
 
-invasive.labels <- annot2smpl %>%
-  inner_join(pca_feat, c(case = "case")) %>%
-  filter(groups=='LB') %>% select(annots, invasive, estimated) %>%
-  mutate(invasive = as.factor(invasive))
-invasive.data <- (q3[invasive.labels$annots])
-colnames(invasive.data) <- make.names(colnames(invasive.data))
 
-tT.LB.real <- do.DGEA(invasive.data, invasive.labels$invasive, invasive.labels$annots)
-tT.LB.estimated <- do.DGEA(invasive.data, invasive.labels$estimated, invasive.labels$annots)
+get.relevant.factors <- function(nmf.expr, patient.groups, use.all=F, clust.cnt=7, boot.cnt=1000){
+  patients.a <- rownames(nmf.expr)[patient.groups == levels(patient.groups)[1]]
+  patients.b <- rownames(nmf.expr)[patient.groups == levels(patient.groups)[2]]
+  
+  if(use.all){
+    factor2analyse <- 1:ncol(nmf.expr)
+  }else{
+    factor.cors <- (1 - (nmf.expr %>% cor() %>% abs)) %>% dist
+    factor.clusts <- factor.cors %>% hclust
+    # factor.dendograms <- factor.clusts %>% as.dendrogram()
+    # possible.colors <- c('red', 'blue', 'orange', 'green', 'purple', 'black', 'pink', 'yellow', 'red', 'blue')
+    # factor.dendograms %>% set("branches_k_color", k = clust.cnt, value=possible.colors) %>% plot()
+    clust.labels <- factor.clusts %>% cutree(k=clust.cnt)
+    factor2analyse <- split(names(clust.labels), clust.labels) %>% sapply(function(cl){cl[1]}) %>% substr(2, 10) %>% as.integer()
+  }
+  
+  factor.tuples <- expand.grid(factor2analyse, factor2analyse, factor2analyse) %>%#, factor2analyse) %>%
+    filter(Var1 < Var2 & Var2 < Var3)# & Var3 < Var4)
+  factor.scores <- factor.tuples %>% apply(1, function(ftuple){
+    a.data <- nmf.expr[patients.a,ftuple] %>% as.matrix()
+    b.data <- nmf.expr[patients.b,ftuple] %>% as.matrix()
+    
+    pca <- prcomp(rbind(a.data, b.data))$x
+    ks.test(pca[patients.a,'PC1'], pca[patients.b,'PC1'])$p.value
+    #ks2d(pca, fast.patients, slow.patients)
+    #wilcox.test(pca[fast.patients,'PC1'], pca[slow.patients,'PC1'])$p.value
+    #-abs(median(pca[fast.patients,'PC1']) - median(pca[slow.patients,'PC1']))
+    
+    # cramer.test(fasts, slows)$p.value
+  })
+  
+  cnt <<- 0
+  boot.res <- boot(
+    c(patients.a, patients.b),
+    function(original, indices){
+      g1 <- original[indices[1:length(patients.a)]]
+      g2 <- original[indices[(length(patients.a)+1):nrow(nmf.expr)]]
+      cnt <<- cnt+1
+      if(cnt %% (boot.cnt %/% 100 * 5) == 0){
+        write(paste0('boot: ', round(cnt/boot.cnt * 100), '%'), stderr())
+      }
+      
+      factor.scores <- factor.tuples %>% apply(1, function(ftuple){
+        a.data <- nmf.expr[g1,ftuple] %>% as.matrix()
+        b.data <- nmf.expr[g2,ftuple] %>% as.matrix()
+        
+        pca <- prcomp(rbind(a.data, b.data))$x
+        ks.test(pca[g1,'PC1'], pca[g2,'PC1'])$p.value
+        #wilcox.test(pca[g1,'PC1'], pca[g2,'PC1'])$p.value
+        #ks2d(pca, g1, g2)
+        #-abs(median(pca[g1,'PC1']) - median(pca[g2,'PC1']))
+        
+        # cramer.test(fasts, slows)$p.value
+      }) %>% min()
+    },
+    boot.cnt
+  )
+  all.res <- boot.res$t
+  p.val <- (sum(min(factor.scores) > all.res)+1)/(length(all.res)+1)
+  
+  all.tuples <- factor.tuples[min(factor.scores) == factor.scores,]
+  
+  separator.factors.int <- all.tuples[1,] %>% unlist()
+  separator.factors <- paste0('Factor', separator.factors.int)
+  
+  list(char=separator.factors, int=separator.factors.int, p.values=p.val, all.possibles=all.tuples)
+}
 
-intersect(rownames(tT.ME.real), rownames(tT.ME.estimated))
-intersect(rownames(tT.LB.real), rownames(tT.LB.estimated))
+ds.relevant.factors <- nmf.brain.expr@fit@H %>% t %>% as.data.frame %>%
+  filter(brain.label$domin_s != 3) %>%
+  get.relevant.factors(factor(brain.label$domin_s[brain.label$domin_s != 3]), use.all=T, boot.cnt=2000)
+ds.factors <- c(2,5,9) #old: (2, 5, 3, 10)
+ggplot(
+  prcomp(nmf.brain.expr@fit@H[ds.factors,] %>% t, scale. = T)$x %>% as.data.frame(),
+  aes(PC1, PC2, col=factor(brain.label$domin_s))
+) + geom_point(size=3)
+pheatmap(nmf.brain.expr@fit@W[,ds.factors])
+nmf.brain.expr@fit@W[,ds.factors] %>% apply(2, sort) %>% as.data.frame() %>%
+  mutate(index=1:nrow(nmf.brain.expr@fit@W)) %>% melt(id='index') %>%
+  ggplot(aes(index, value)) + geom_point() + facet_wrap(~variable)
+nmf.brain.expr@fit@W[,ds.factors] %>% apply(2, function(values){
+  rownames(nmf.brain.expr@fit@W)[order(values, decreasing = T)][1:100]
+}) %>% write.csv('ds_genes.csv')
+ggpairs(
+  nmf.brain.expr@fit@H[ds.factors,] %>% t %>% as.data.frame %>% filter(brain.label$domin_s != 3),
+  mapping = aes(col=factor(brain.label$domin_s[brain.label$domin_s != 3]))
+) #high ~ bad: 2, 5; low ~ bad: 9
+
+
+#old: (1, 4, 5, 10)
+hs.relevant.factors <- nmf.brain.expr@fit@H %>% t %>% as.data.frame %>%
+  filter(brain.label$high_s != 1) %>%
+  get.relevant.factors(factor(brain.label$high_s[brain.label$high_s != 1]), use.all=T, boot.cnt=2000)
+hs.factors <- c(4,5,10)
+ggplot(
+  prcomp(nmf.brain.expr@fit@H[hs.factors,] %>% t, scale. = T)$x %>% as.data.frame(),
+  aes(PC1, PC2, col=factor(brain.label$high_s))
+) + geom_point(size=3)
+pheatmap(nmf.brain.expr@fit@W[,hs.factors])
+nmf.brain.expr@fit@W[,hs.factors] %>% apply(2, sort) %>% as.data.frame() %>%
+  mutate(index=1:nrow(nmf.brain.expr@fit@W)) %>% melt(id='index') %>%
+  ggplot(aes(index, value)) + geom_point() + facet_wrap(~variable)
+nmf.brain.expr@fit@W[,hs.factors] %>% apply(2, function(values){
+  rownames(nmf.brain.expr@fit@W)[order(values, decreasing = T)][1:100]
+}) %>% write.csv('hs_genes.csv')
+ggpairs(
+  nmf.brain.expr@fit@H[hs.factors,] %>% t %>% as.data.frame %>% filter(brain.label$high_s != 1),
+  mapping = aes(col=factor(brain.label$high_s[brain.label$high_s != 1]))
+) #high ~ bad: 5; low ~ bad: 4, 10
+
