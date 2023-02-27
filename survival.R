@@ -7,6 +7,8 @@ require(infotheo)
 require(GGally)
 require(survival)
 require(randomForestSRC)
+require(limma)
+require(reshape2)
 
 
 z.normalization <- function(dataset){
@@ -104,7 +106,8 @@ plate.summary2 <- plate.summary2 %>% inner_join(death_date, by='case') %>%
 
 
 cor(plate.summary, plate.summary$survival, use='complete.obs') %>% abs %>% View
-ggplot(plate.summary, aes(survival, filled_overlap_max_area)) + geom_point(size=3) + geom_smooth(method='lm')
+ggplot(plate.summary, aes(survival, filled_overlap_max_area)) +
+  geom_point(size=3) + geom_smooth(method='lm') + ylim(c(-2, 2))
 
 cor(plate.summary2, plate.summary2$survival, use='complete.obs') %>% abs %>% View
 ggplot(plate.summary2, aes(survival, `cooccurrence_mat_3 100%`)) +
@@ -148,6 +151,8 @@ cox_model2 <- coxph(Surv(survival, available) ~ ., data = plate.PC2)
 summary(cox_model2)
 ggplot(plate.PC2, aes(survival, V12)) + geom_point(size=3) +
   geom_smooth(method='lm') + ylim(c(-2, 2))
+
+(grades %>% inner_join(death_date, by='case') %>% ggplot(aes(high_s+h_per, survival))) + geom_point(size=3) + geom_smooth(method='lm')
 
 
 ###############################################
