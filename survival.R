@@ -66,12 +66,15 @@ my.grades <- my.grades %>% mutate(
 ################################################################################
 
 death_date <- read.csv('../data/death_date.csv')
+death_date$Date.of.primary.Dx <- as.Date(death_date$Date.of.primary.Dx, format = "%m/%d/%Y")
 death_date$Date.of.secondary.Dx <- as.Date(death_date$Date.of.secondary.Dx, format = "%m/%d/%Y")
 death_date$Date.of.Death...Cerner. <- as.Date(death_date$Date.of.Death...Cerner., format = "%Y-%m-%d")
-death_date <- death_date %>% mutate(survival = round(
-  as.numeric(difftime(Date.of.Death...Cerner., Date.of.secondary.Dx, units = "days")
-             )/30.44)) %>% rename(case = Study..) %>%
-  select(case, survival) %>% mutate(cencored = is.na(survival)) %>%
+death_date <- death_date %>% mutate(
+  survival = round(as.numeric(difftime(Date.of.Death...Cerner., Date.of.secondary.Dx, units = "days"))/30.44)) %>%
+  mutate(
+    met_interval = round(as.numeric(difftime(Date.of.secondary.Dx, Date.of.primary.Dx, units = "days"))/30.44)) %>%
+  rename(case = Study..) %>%
+  select(case, survival, met_interval) %>% mutate(cencored = is.na(survival)) %>%
   mutate(case = as.integer(substr(case, 5, 7)))
 
 ################################################################################
@@ -100,9 +103,9 @@ plate.summary2 <- Reduce(rbind.data.frame, plate.summary2)
 
 ###############################################
 plate.summary <- plate.summary %>% inner_join(death_date, by='case') %>%
-  mutate(available=!cencored) %>% select(-cencored, -case)
+  mutate(available=!cencored) %>% select(-cencored, -case, -met_interval)
 plate.summary2 <- plate.summary2 %>% inner_join(death_date, by='case') %>%
-  mutate(available=!cencored) %>% select(-cencored, -case)
+  mutate(available=!cencored) %>% select(-cencored, -case, -met_interval)
 
 
 cor(plate.summary, plate.summary$survival, use='complete.obs') %>% abs %>% View
@@ -149,18 +152,98 @@ ggplot(plate.PC, aes(survival, V4)) + geom_point(size=3) +
 
 cox_model2 <- coxph(Surv(survival, available) ~ ., data = plate.PC2)
 summary(cox_model2)
+
+names(plate.groups2)[plate.groups2 == 1]
+names(plate.groups2)[plate.groups2 == 2]
+names(plate.groups2)[plate.groups2 == 5]
+names(plate.groups2)[plate.groups2 == 12]
+
+cox_surv <- survfit(cox_model2, newdata = plate.PC2, type = "kaplan-meier", conf.int = FALSE)
+plot(cox_surv)
+
+ggplot(plate.PC2, aes(survival, V1)) + geom_point(size=3) +
+  geom_smooth(method='lm') + ylim(c(-2, 2))
+ggplot(plate.PC2, aes(survival, V2)) + geom_point(size=3) +
+  geom_smooth(method='lm') + ylim(c(-2, 2))
+ggplot(plate.PC2, aes(survival, V5)) + geom_point(size=3) +
+  geom_smooth(method='lm') + ylim(c(-2, 2))
 ggplot(plate.PC2, aes(survival, V12)) + geom_point(size=3) +
   geom_smooth(method='lm') + ylim(c(-2, 2))
 
-(grades %>% inner_join(death_date, by='case') %>% ggplot(aes(high_s+h_per, survival))) + geom_point(size=3) + geom_smooth(method='lm')
+
+
+
+(my.grades %>% inner_join(death_date, by='case') %>% ggplot(aes(high_s+h_per, survival))) + geom_point(size=3) + geom_smooth(method='lm')
+(my.grades %>% inner_join(death_date, by='case') %>% ggplot(aes(met_interval, high_s+h_per))) + geom_point(size=3) + geom_smooth(method='lm')
 
 
 ###############################################
-surv_prob <- predict(rsf_fit, type = "prob")
-surv_fit <- survfit(Surv(survival, available) ~ 1, data = data.frame(surv_prob))
+{
+  # Fit the Kaplan-Meier survival curve to your data
+  survival_data <- death_date %>% mutate(available = !cencored) %>%
+    inner_join(my.grades, by='case') %>% filter(domin_s != 3) ####### IMPORTANT: FILTER?
+  km_fit <- survfit(
+    Surv(survival, available) ~ domin_s,
+    data = survival_data
+  )
+  
+  # Plot the Kaplan-Meier survival curve
+  plot(
+    km_fit, main = "Kaplan-Meier Survival - Dominant Scores", xlab = "Time (months)",
+    ylab = "Survival probability", col=c('red', 'blue')
+  )
+  legend("bottomleft", legend = levels(factor(survival_data$domin_s)), col = c('red', 'blue'), lty = 1)
+  med_times <- lapply(1:2, function(x) {
+    quantile(survival_data$survival[survival_data$domin_s == x], probs = 0.5, na.rm=T)
+  })
+  
+  # Add vertical lines at the median survival times
+  for (i in 1:length(med_times)) {
+    abline(v = med_times[[i]], lty = 2, col = c('red', 'blue')[i])
+  }
+  
+  
+  # Calculate the log-rank test p-value
+  survdiff_result <- survdiff(Surv(survival, available) ~ domin_s, data = survival_data)
+  p_value <- round(1 - pchisq(survdiff_result$chisq, length(survdiff_result$n) - 1), 4)
+  
+  # Add the p-value to the plot
+  text(60, 0.9, paste0("Log-rank test p-value = ", p_value))
+}
+{
+  # Fit the Kaplan-Meier survival curve to your data
+  survival_data <- death_date %>% mutate(available = !cencored) %>%
+    inner_join(my.grades, by='case') %>% filter(high_s != 1) ####### IMPORTANT: FILTER?
+  km_fit <- survfit(
+    Surv(survival, available) ~ high_s,
+    data = survival_data
+  )
+  
+  # Plot the Kaplan-Meier survival curve
+  plot(
+    km_fit, main = "Kaplan-Meier Survival - Highest Scores", xlab = "Time (months)",
+    ylab = "Survival probability", col=c('red', 'blue')
+  )
+  legend("bottomleft", legend = levels(factor(survival_data$high_s)), col = c('red', 'blue'), lty = 1)
+  med_times <- lapply(2:3, function(x) {
+    quantile(survival_data$survival[survival_data$high_s == x], probs = 0.5, na.rm=T)
+  })
+  
+  # Add vertical lines at the median survival times
+  for (i in 1:length(med_times)) {
+    abline(v = med_times[[i]], lty = 2, col = c('red', 'blue')[i])
+  }
+  
+  
+  # Calculate the log-rank test p-value
+  survdiff_result <- survdiff(Surv(survival, available) ~ high_s, data = survival_data)
+  p_value <- round(1 - pchisq(survdiff_result$chisq, length(survdiff_result$n) - 1), 4)
+  
+  # Add the p-value to the plot
+  text(60, 0.9, paste0("Log-rank test p-value = ", p_value))
+}
 
-# Plot the survival curves
-plot(surv_fit, xlab = "Time", ylab = "Survival Probability", main = "Survival Curves for mgus dataset")
+
 
 
 
