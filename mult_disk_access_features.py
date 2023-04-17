@@ -313,6 +313,24 @@ def denoise_segments(segments, kernel):
 
     return segments
 
+def make_mask_compact(obj_mask, thickness=200, comprehensive = 20):
+    close_kernel = np.ones((thickness,thickness),np.uint8)
+    
+    _, labels_im, stats, _ = cv2.connectedComponentsWithStats(obj_mask.astype(np.uint8))
+    all_areas = stats[:, 4]
+
+    biggest_comps = (-all_areas).argsort()[1:comprehensive]
+    all_comps = np.unique(labels_im)
+    final_result = obj_mask.copy()
+    for comp in all_comps:
+        if comp in biggest_comps:
+            curr_component = np.zeros(final_result.shape, np.uint8)
+            curr_component[labels_im == comp] = 255
+            curr_component = cv2.morphologyEx(curr_component, cv2.MORPH_CLOSE, close_kernel).astype(np.uint8)
+            final_result[curr_component != 0] = curr_component[curr_component != 0]
+    
+    return final_result
+
 ######## Features
 def invasion_count(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     pool_d = 9
@@ -406,16 +424,16 @@ def delaunay_score(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
     fill_number = pix_dim * (obj_segments.shape[0] + obj_segments.shape[1])/2
 
     open_kernel = np.ones((20,20),np.uint8)
-    close_kernel = np.ones((200,200),np.uint8)
     denoised_brain = cv2.morphologyEx(obj_segments[:,:,1] * 255, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
-    compact_brain = cv2.morphologyEx(denoised_brain, cv2.MORPH_CLOSE, close_kernel).astype(np.uint8)
+    brain_holes = make_mask_compact(denoised_brain)
+    brain_holes[denoised_brain != 0] = 0
 
-    open_kernel = np.ones((20,20),np.uint8)
+    open_kernel = np.ones((15,15),np.uint8)
     close_kernel = np.ones((30,30),np.uint8)
     denoised_tumor = cv2.morphologyEx(obj_segments[:,:,0] * 255, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
     compact_tumor = cv2.morphologyEx(denoised_tumor, cv2.MORPH_CLOSE, close_kernel).astype(np.uint8)
 
-    invaded_tumors = cv2.bitwise_and(compact_tumor, compact_tumor,mask = compact_brain)
+    invaded_tumors = cv2.bitwise_and(compact_tumor, compact_tumor,mask = brain_holes)
 
     contours, hierarchy = cv2.findContours(invaded_tumors, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     if hierarchy is None:
@@ -463,6 +481,12 @@ def delaunay_score(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
         dists = np.linalg.norm(head_points - tail_points, axis=1)
 
         all_dists.append(dists)
+    
+    if len(all_dists) == 0:
+        all_dists = np.linalg.norm(points[[0,1,2],:] - points[[1,2,0],:], axis=1)
+        quantiles = np.quantile(all_dists, [0, .25, .5, .75, 1])
+        return {'min': quantiles[0], 'quartile1': quantiles[1], 'median': quantiles[2], 'quartile3': quantiles[3], 'max': quantiles[4]}
+
     all_dists = np.array(all_dists).reshape((-1,))
 
     all_dists = all_dists * pix_dim
@@ -482,16 +506,16 @@ def delaunay_score(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cac
 
 def tumor_components(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
     open_kernel = np.ones((20,20),np.uint8)
-    close_kernel = np.ones((200,200),np.uint8)
     denoised_brain = cv2.morphologyEx(obj_segments[:,:,1] * 255, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
-    compact_brain = cv2.morphologyEx(denoised_brain, cv2.MORPH_CLOSE, close_kernel).astype(np.uint8)
+    brain_holes = make_mask_compact(denoised_brain)
+    brain_holes[denoised_brain != 0] = 0
 
-    open_kernel = np.ones((20,20),np.uint8)
+    open_kernel = np.ones((15,15),np.uint8)
     close_kernel = np.ones((30,30),np.uint8)
     denoised_tumor = cv2.morphologyEx(obj_segments[:,:,0] * 255, cv2.MORPH_OPEN, open_kernel).astype(np.uint8)
     compact_tumor = cv2.morphologyEx(denoised_tumor, cv2.MORPH_CLOSE, close_kernel).astype(np.uint8)
 
-    invaded_tumors = cv2.bitwise_and(compact_tumor, compact_tumor,mask = compact_brain)
+    invaded_tumors = cv2.bitwise_and(compact_tumor, compact_tumor,mask = brain_holes)
 
     contours, hierarchy = cv2.findContours(invaded_tumors, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
     if hierarchy is None:
@@ -525,6 +549,7 @@ def tumor_components(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, c
     return {'cnt': len(contours), 'min_area': np.min(contour_areas), 'max_area': np.max(contour_areas), 'med_area': np.median(contour_areas)}
 
 def interface_ellipse(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, cache):
+    # TODO: IMPOOOOOORTAAAANT should be renamed and refactored
     tumor_mask = (obj_segments[:,:,0] * 255).astype(np.uint8)
     brain_mask = (obj_segments[:,:,1] * 255).astype(np.uint8)
     open_kernel = np.ones((20,20),np.uint8)
@@ -540,48 +565,22 @@ def interface_ellipse(obj_segments, h_pix_size, w_pix_size, brain_boundary_pts, 
 
     # final_contours = []
     final_eccentricity = []
-    final_areas = []
+    final_perimeters = []
 
-    pix_area = h_pix_size * w_pix_size
+    pix_size = (h_pix_size + w_pix_size) / 2
 
     for cnt in contours:
         if(cnt.shape[0] < 5): continue
         contour_area = cv2.contourArea(cnt)
         if(contour_area < 20): continue
-        fitted_ellipse = cv2.fitEllipse(cnt) # center point, axes lengths, and orientation angle
-        b_e, a_e = fitted_ellipse[1]
-        b_e, a_e = min(b_e, a_e), max(b_e, a_e)
-        c_e = np.sqrt(1 - (b_e/a_e)**2)
-        eccentricity = c_e/a_e
-        ellipse_area = np.pi * a_e * b_e
-        if ellipse_area / contour_area > 10: continue
-        final_eccentricity.append(eccentricity)
-        # final_contours.append(cnt)
-        final_areas.append(contour_area * pix_area)
-        # detected_interface = cv2.ellipse(detected_interface, fitted_ellipse, 255, 10)
-
-    # interfaced_seg = obj_segments.copy()
-    # interfaced_seg[:,:,2] = detected_interface / 255.
-
-    # extendeds = obj_segments.copy()
-    # extendeds[:,:,0] = extended_tumor / 255.
-    # extendeds[:,:,1] = extended_brain / 255.
-
-    # fig, axs = plt.subplots(2, 2)
-    # fig.tight_layout()
-    # axs[0, 0].imshow(obj_segments)
-    # axs[0, 0].set_title('Segments')
-    # axs[0, 1].imshow(extendeds)
-    # axs[0, 1].set_title('Extendeds')
-    # # axs[1, 0].imshow(switch_thresh, cmap='gray')
-    # # axs[1, 0].set_title('Switch Thresholds')
-    # axs[1, 1].imshow(interfaced_seg)
-    # axs[1, 1].set_title('interfaced_seg')
-    # plt.show()
+        contour_perim = cv2.arcLength(cnt, True)
+        stretch_level = (contour_perim**2) / (4 * np.pi * contour_area)
+        final_eccentricity.append(stretch_level)
+        final_perimeters.append(contour_perim * pix_size)
 
     quantiles = [.1, .5, .9]
     eccent_quants = np.quantile(final_eccentricity, quantiles)
-    area_quants = np.quantile(final_areas, quantiles)
+    area_quants = np.quantile(final_perimeters, quantiles)
 
     return {
         **{'eccent_quants_' + str(quantiles[i]): eccent_quants[i] for i in range(len(quantiles))},
@@ -974,30 +973,30 @@ def get_interface(brain_mask, tumor_mask, erode_size=15, dilate_size=25, radius=
 
 
 src_list = [
-    '../data/LB-Dual GFAP CK IHC/LB01.svs',
-    '../data/LB-Dual GFAP CK IHC/LB02.svs',
-    '../data/LB-Dual GFAP CK IHC/LB03.svs',
-    '../data/LB-Dual GFAP CK IHC/LB04.svs',
-    '../data/LB-Dual GFAP CK IHC/LB05.svs',
-    '../data/LB-Dual GFAP CK IHC/LB06.svs',
-    '../data/LB-Dual GFAP CK IHC/LB07.svs',
-    '../data/LB-Dual GFAP CK IHC/LB08.svs',
-    '../data/LB-Dual GFAP CK IHC/LB09.svs',
-    '../data/LB-Dual GFAP CK IHC/LB10.svs',
-    '../data/LB-Dual GFAP CK IHC/LB13.svs',
-    '../data/LB-Dual GFAP CK IHC/LB14.svs',
-    '../data/LB-Dual GFAP CK IHC/LB15.svs',
-    '../data/LB-Dual GFAP CK IHC/LB16.svs',
-    '../data/LB-Dual GFAP CK IHC/LB17.svs',
-    '../data/LB-Dual GFAP CK IHC/LB18.svs',
-    '../data/LB-Dual GFAP CK IHC/LB19.svs',
-    '../data/LB-Dual GFAP CK IHC/LB20.svs',
-    '../data/LB-Dual GFAP CK IHC/LB21.svs',
-    '../data/LB-Dual GFAP CK IHC/LB22.svs',
-    # '../data/LB-Dual GFAP CK IHC/LB24.svs', ### Necrotic, discard
-    '../data/LB-Dual GFAP CK IHC/LB31.svs',
-    '../data/LB-Dual GFAP CK IHC/LB34.svs',
-    '../data/LB-Dual GFAP CK IHC/LB35.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB01.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB02.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB03.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB04.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB05.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB06.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB07.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB08.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB09.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB10.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB13.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB14.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB15.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB16.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB17.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB18.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB19.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB20.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB21.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB22.svs',
+    # # '../data/LB-Dual GFAP CK IHC/LB24.svs', ### Necrotic, discard
+    # '../data/LB-Dual GFAP CK IHC/LB31.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB34.svs',
+    # '../data/LB-Dual GFAP CK IHC/LB35.svs',
     '../data/LB-Dual GFAP CK IHC/LB37.svs',
     '../data/LB-Dual GFAP CK IHC/LB40.svs',
     '../data/LB-Dual GFAP CK IHC/LB44.svs',
@@ -1067,7 +1066,7 @@ for src in src_list:
                 brain_convexity,
                 brain_solidity,
                 convex_overlap,
-                filled_overlap,
+                # filled_overlap,
                 # enclosing_circle_overlap,
                 # _mask_curvature,
                 # mask_area,

@@ -93,12 +93,12 @@ mapping <- data.frame(
   'delaunay_score_median'=3:1,
   'delaunay_score_quartile3'=3:1,
   'tumor_components_cnt'=1:3,
-  'tumor_components_min_area'=c(1,3,2),
+  'tumor_components_min_area'=3:1,
   'tumor_components_max_area'=c(1,3,2),
   'tumor_components_med_area'=c(1,3,2),
-  'interface_ellipse_eccent_quants_0.1'=c(2,3,1),
-  'interface_ellipse_eccent_quants_0.5'=c(3,1,2),
-  'interface_ellipse_eccent_quants_0.9'=c(2,3,1),
+  'interface_ellipse_eccent_quants_0.1'=c(1,3,2),
+  'interface_ellipse_eccent_quants_0.5'=c(1,3,2),
+  'interface_ellipse_eccent_quants_0.9'=c(1,3,2),
   'interface_ellipse_area_quants_0.1'=3:1,
   'interface_ellipse_area_quants_0.5'=c(1,3,2),
   'interface_ellipse_area_quants_0.9'=c(1,3,2),
@@ -112,14 +112,14 @@ mapping <- data.frame(
   'brain_compactness'=3:1,
   'brain_convexity'=3:1,
   'brain_solidity'=3:1,
-  'convex_overlap'=c(1,3,2),
-  'filled_overlap_cnt'=1:3,
-  'filled_overlap_min_area'=c(1,3,2),
-  'filled_overlap_max_area'=c(1,3,2),
-  'filled_overlap_med_area'=c(1,3,2)
+  'convex_overlap'=c(1,3,2)#,
+  # 'filled_overlap_cnt'=1:3,
+  # 'filled_overlap_min_area'=c(1,3,2),
+  # 'filled_overlap_max_area'=c(1,3,2),
+  # 'filled_overlap_med_area'=c(1,3,2)
 )
 
-feature.families <- list(1:4, 5:8, 9:12, 13:18, 19:25, 26:28, 30:33)
+feature.families <- list(1:4, 5:8, 9:12, 13:18, 19:25, 26:28)
 feature.families %>% lapply(function(feat.range){
   feat.names <- Reduce(paste, colnames(mapping)[feat.range])
   family.pca <- indiv.features %>%
@@ -274,11 +274,11 @@ ABI_groups <- c(
   'brain_compactness'='B',
   'brain_convexity'='B',
   'brain_solidity'='I',
-  'convex_overlap'='A',
-  'filled_overlap_cnt'='I',
-  'filled_overlap_min_area'='A',
-  'filled_overlap_max_area'='A',
-  'filled_overlap_med_area'='A'
+  'convex_overlap'='A'#,
+  # 'filled_overlap_cnt'='I',
+  # 'filled_overlap_min_area'='A',
+  # 'filled_overlap_max_area'='A',
+  # 'filled_overlap_med_area'='A'
 )
 
 abi.mat <- c('A', 'B', 'I') %>% sapply(function(vote.f){
